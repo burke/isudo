@@ -5,12 +5,12 @@ use std::fmt;
 
 use isudo_client::{envelope, outcome_of};
 use isudo_core::env::Built;
+use isudo_core::pairing::{HostIdentity, Opening};
 use isudo_core::plan::{Context, HostKey, PhoneKey, Plan, Proposal, Verdict};
 use isudo_phone::{Pairing, Progress};
 use isudo_proto::api::{Ack, Answer, Confirm, CreatePairing, Decision, PendingRequest, SubmitRequest};
 use isudo_proto::codec::{b64_decode, b64_encode, hex_encode};
 use isudo_proto::frame::Outcome;
-use isudo_proto::pairing::Offer;
 use isudo_proto::request::{EnvOrigin, EnvVar, Request, StdinKind};
 use isudo_proto::{sigs, PAIRING_ID_LEN, SIG_LEN};
 use isudo_relay_core::{Limits, Relay};
@@ -130,13 +130,13 @@ impl World {
         };
         let host_key = setup(HostKey::new(&host_scalar).ok_or("invalid"), "host key")?;
         let host_pub = setup(host_key.public().ok_or("unserializable"), "host public key")?;
-        let offer = Offer {
-            relay_url: "https://relay.invalid".to_owned(),
-            pairing_id: rng.bytes(),
-            host_pub,
-            secret: rng.bytes(),
-            host_name: "simhost".to_owned(),
-        };
+        let opening = Opening::new(
+            HostIdentity { relay_url: "https://relay.invalid".to_owned(), host_pub, host_name: "simhost".to_owned() },
+            rng.bytes(),
+            rng.bytes(),
+            rng.bytes(),
+        );
+        let offer = opening.offer().clone();
         let mut phone = setup(Pairing::begin(&offer, &rng.bytes()), "phone keys")?;
         let pairing_hex = hex_encode(&offer.pairing_id);
 
@@ -154,21 +154,27 @@ impl World {
             ),
             "create pairing",
         )?;
-        let claim = phone.claim("simphone", None);
-        setup(relay.claim(now, &pairing_hex, &claim), "claim")?;
-        let phone_kem_pub = setup(isudo_proto::pairing::decode_pubkey(&claim.phone_kem_pub), "phone kem key")?;
-        let ack_nonce: [u8; 16] = rng.bytes();
+        // The same steps `isudo-admin pair` takes, with the real decisions.
+        setup(relay.claim(now, &pairing_hex, &phone.claim("simphone", None)), "claim")?;
+        let answer = setup(relay.claim_view(&pairing_hex), "claim view")?;
+        let answer = setup(answer.ok_or("missing"), "claim view")?;
+        let accepted = setup(opening.accept(&answer), "accept")?;
         let ack = Ack {
-            nonce: b64_encode(&ack_nonce),
-            host_sig: b64_encode(
-                &host_key.sign(&sigs::pair_ack_msg(&offer.pairing_id, phone.sign_pub(), &phone_kem_pub, &ack_nonce)),
-            ),
+            nonce: b64_encode(accepted.host_nonce()),
+            host_sig: b64_encode(&host_key.sign(&accepted.ack_message())),
         };
         setup(relay.acknowledge(&pairing_hex, &ack), "acknowledge")?;
+        let status = setup(relay.status(&pairing_hex, phone.token()), "status")?;
+        let Progress::ShowCode(code) = setup(phone.observe(&status), "phone code")? else {
+            return violation("simulation setup failed: the phone had no code to show");
+        };
+        let pinned = setup(accepted.confirm(&code).ok_or("wrong code"), "confirm code")?;
         let confirm = Confirm {
-            host_sig: b64_encode(
-                &host_key.sign(&sigs::pair_confirm_msg(&offer.pairing_id, phone.sign_pub(), &phone_kem_pub)),
-            ),
+            host_sig: b64_encode(&host_key.sign(&sigs::pair_confirm_msg(
+                &offer.pairing_id,
+                pinned.phone_sign_pub(),
+                pinned.phone_kem_pub(),
+            ))),
         };
         setup(relay.confirm(&pairing_hex, &confirm), "confirm")?;
         let status = setup(relay.status(&pairing_hex, phone.token()), "status")?;
@@ -188,7 +194,7 @@ impl World {
             host_key,
             phone,
             phone_key,
-            phone_kem_pub,
+            phone_kem_pub: *pinned.phone_kem_pub(),
             attacker,
             waiting: Vec::new(),
             created: BTreeMap::new(),

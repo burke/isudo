@@ -56,14 +56,17 @@ fn claim_body(with_device: bool) -> Claim {
         phone_sign_pub: phone().public_b64(),
         phone_kem_pub: Party::new(3).public_b64(),
         phone_name: "Burke's iPhone".into(),
+        phone_nonce: b64_encode(&PHONE_NONCE),
         claim_mac: b64_encode(&[5; 32]),
         phone_token: token(),
         device: with_device.then(|| DeviceUpdate { apns_token: APNS.into(), apns_env: "sandbox".into() }),
     }
 }
 
+const PHONE_NONCE: [u8; 16] = [0x70; 16];
+
 fn ack_body(signer: &Party) -> Ack {
-    let message = sigs::pair_ack_msg(&PID, &phone().public(), &Party::new(3).public(), &[0x4e; 16]);
+    let message = sigs::pair_ack_msg(&PID, &phone().public(), &Party::new(3).public(), &PHONE_NONCE, &[0x4e; 16]);
     Ack { nonce: b64_encode(&[0x4e; 16]), host_sig: signer.sign(&message) }
 }
 
@@ -157,6 +160,18 @@ fn pairing_states_advance_in_order() {
     assert_eq!(relay2.acknowledge(&pid(), &renonced), Err(Reject::Unauthorized));
     let short = Ack { nonce: b64_encode(&[0x4e; 8]), ..ack_body(&host()) };
     assert_eq!(relay2.acknowledge(&pid(), &short), Err(Reject::Invalid));
+    // The signature covers the nonce the phone sent with its answer, so an
+    // acknowledgement made for one answer does not fit another.
+    let mut relay3 = Relay::default();
+    relay3.create_pairing(100, &create_body(), None).unwrap();
+    let other_nonce = Claim { phone_nonce: b64_encode(&[0x71; 16]), ..claim_body(false) };
+    relay3.claim(101, &pid(), &other_nonce).unwrap();
+    assert_eq!(relay3.acknowledge(&pid(), &ack_body(&host())), Err(Reject::Unauthorized));
+    // An answer must carry a nonce of the right size.
+    let mut relay4 = Relay::default();
+    relay4.create_pairing(100, &create_body(), None).unwrap();
+    let no_nonce = Claim { phone_nonce: String::new(), ..claim_body(false) };
+    assert_eq!(relay4.claim(101, &pid(), &no_nonce), Err(Reject::Invalid));
     assert_eq!(relay.claim_view(&pid()).unwrap().unwrap().phone_name, "Burke's iPhone");
     // Requests are refused until the host confirms.
     assert_eq!(relay.submit(102, &submit_body(1, 200)), Err(Reject::NotFound));

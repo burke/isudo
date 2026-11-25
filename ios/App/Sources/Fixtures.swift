@@ -39,6 +39,15 @@ struct Fixture {
             activity = Self.history
         case "waiting":
             pairingFlow = .waitingForComputer(hostName: "burke-mbp", pairingID: Data(repeating: 0xa1, count: 16))
+        case "confirm", "confirmlink":
+            let (pairingID, hostPub) = (Data(repeating: 0xa1, count: 16), P256.Signing.PrivateKey().publicKey.x963Representation)
+            let offer = PairingOffer(
+                relayURL: "https://relay.example", pairingID: pairingID, hostPub: hostPub,
+                secret: Data(repeating: 1, count: 32), commitment: Data(repeating: 2, count: 32), hostName: "burke-mbp"
+            )
+            pairingFlow = .confirming(offer, source: name == "confirm" ? .scan : .link)
+        case "steered":
+            pairingFlow = .steered(hostName: "burke-mbp")
         case "otherphone":
             pairingFlow = .otherPhoneAccepted(hostName: "burke-mbp")
         case "code":
@@ -58,22 +67,29 @@ struct Fixture {
     /// A pairing confirmed by a host key made up on the spot.
     private static func pairing(_ name: String, id: UInt8, hardwareBacked: Bool) -> Pairing {
         let host = P256.Signing.PrivateKey()
+        let (pairingID, hostPub) = (Data(repeating: id, count: 16), host.publicKey.x963Representation)
+        let nonce = Data(repeating: 0x4e, count: Proto.hostNonceLength)
+        let phoneNonce = Data(repeating: 0x70, count: Proto.phoneNonceLength)
         let offer = PairingOffer(
-            relayURL: "https://relay.example", pairingID: Data(repeating: id, count: 16),
-            hostPub: host.publicKey.x963Representation, secret: Data(repeating: 1, count: 32), hostName: name
+            relayURL: "https://relay.example", pairingID: pairingID, hostPub: hostPub,
+            secret: Data(repeating: 1, count: 32),
+            commitment: Crypto.commitment(pairingID: pairingID, hostPub: hostPub, hostNonce: nonce), hostName: name
         )
         let signPub = P256.Signing.PrivateKey().publicKey.x963Representation
         let kemPub = P256.KeyAgreement.PrivateKey().publicKey.x963Representation
-        guard var pairing = try? Pairing(offer: offer, signPub: signPub, kemPub: kemPub, hardwareBacked: hardwareBacked) else {
+        guard var pairing = try? Pairing(
+            offer: offer, signPub: signPub, kemPub: kemPub, phoneNonce: phoneNonce, hardwareBacked: hardwareBacked
+        ) else {
             fatalError("fixture pairing")
         }
         func signed(_ message: Data) -> String {
             Codec.b64Encode((try? host.signature(for: message).rawRepresentation) ?? Data())
         }
-        let nonce = Data(repeating: 0x4e, count: Proto.ackNonceLength)
         let ack = API.Ack(
             nonce: Codec.b64Encode(nonce),
-            hostSig: signed(Messages.pairAck(pairingID: offer.pairingID, phoneSignPub: signPub, phoneKemPub: kemPub, nonce: nonce))
+            hostSig: signed(Messages.pairAck(
+                pairingID: offer.pairingID, phoneSignPub: signPub, phoneKemPub: kemPub, phoneNonce: phoneNonce, hostNonce: nonce
+            ))
         )
         let confirm = signed(Messages.pairConfirm(pairingID: offer.pairingID, phoneSignPub: signPub, phoneKemPub: kemPub))
         _ = try? pairing.observe(API.PairingStatus(state: .active, ack: ack, hostSig: confirm))

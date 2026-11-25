@@ -43,9 +43,21 @@ struct ActivityEntry: Identifiable, Codable, Equatable {
     var reason: String?
 }
 
+/// How a pairing code reached the app.
+enum OfferSource: Equatable {
+    case scan
+    case paste
+    /// An `isudo://` link opened from outside the app. Any app or web page
+    /// can do that, so this one gets a warning.
+    case link
+}
+
 /// Where the pairing sheet is in its conversation with the computer.
 enum PairingFlow: Equatable {
     case scanning
+    /// A pairing code has been read and nothing else has happened: no keys
+    /// made, nothing sent. The person decides whether to go on.
+    case confirming(PairingOffer, source: OfferSource)
     case contacting(hostName: String)
     /// This phone has answered; the computer has not yet accepted it. There
     /// is no code to show until it does.
@@ -55,6 +67,9 @@ enum PairingFlow: Equatable {
     case alreadyClaimed(hostName: String)
     /// The computer accepted an answer, and it was not this phone's.
     case otherPhoneAccepted(hostName: String)
+    /// Whoever wrote the pairing code tried to choose the code this phone
+    /// would show.
+    case steered(hostName: String)
     case failed(String)
     case paired(hostName: String, hardwareBacked: Bool)
 }
@@ -244,23 +259,57 @@ final class AppModel {
 
     // MARK: Pairing
 
+    /// A pairing link opened from outside the app.
     func handle(url: URL) {
         guard url.scheme == "isudo" else { return }
-        Task { await beginPairing(link: url.absoluteString) }
+        // Anything can open a link. It must never displace a pairing that is
+        // under way, or the pairing code the person is being asked about.
+        switch pairingFlow {
+        case .confirming, .contacting, .waitingForComputer, .code: return
+        case nil, .scanning, .alreadyClaimed, .otherPhoneAccepted, .steered, .failed, .paired: break
+        }
+        review(link: url.absoluteString, source: .link)
     }
 
-    func beginPairing(link: String) async {
+    /// Reads a pairing code and asks the person about it. Nothing is
+    /// generated or sent until they agree: see `confirmPairing`.
+    func review(link: String, source: OfferSource) {
         let offer: PairingOffer
-        do {
+        do throws(PairingOffer.ParseError) {
             offer = try PairingOffer(link: link)
         } catch {
-            pairingFlow = .failed("That is not an isudo pairing code.")
+            pairingFlow = .failed(error.reason == PairingOffer.outdated
+                ? "That pairing code was made by an older version of isudo. Update isudo on the computer, then run the pairing command again."
+                : "That is not an isudo pairing code.")
             return
         }
         guard pairing(offer.pairingID) == nil else {
             pairingFlow = .failed("This phone already answered that pairing code.")
             return
         }
+        // The name and relay are about to be shown, and acted on. Refuse
+        // anything that would not read the way it is written.
+        let readable = [offer.hostName, offer.relayURL].allSatisfy { text in
+            !text.isEmpty && !EscapedText(Data(text.utf8)).hasEscapes
+        }
+        guard readable, (try? RelayClient(baseURL: offer.relayURL)) != nil else {
+            pairingFlow = .failed("That pairing code is not one this phone will use: its computer name or relay address is not acceptable.")
+            return
+        }
+        pairingFlow = .confirming(offer, source: source)
+    }
+
+    /// The person agreed to pair with the computer in the pairing code.
+    func confirmPairing() async {
+        guard case .confirming(let offer, _) = pairingFlow else { return }
+        guard !isFixture else {
+            pairingFlow = .failed("Sample data is showing, so nothing can be paired.")
+            return
+        }
+        await beginPairing(offer)
+    }
+
+    private func beginPairing(_ offer: PairingOffer) async {
         pairingFlow = .contacting(hostName: offer.hostName)
         let idHex = Codec.hexEncode(offer.pairingID)
         do {
@@ -273,8 +322,11 @@ final class AppModel {
                 return
             }
             let (kemPub, token) = try PairingSecrets.create(pairingIDHex: idHex, in: secrets)
+            // Chosen now, after the pairing code was read: this is what
+            // stops whoever wrote that code choosing the six digits.
             let pairing = try Pairing(
-                offer: offer, signPub: signer.publicKey, kemPub: kemPub, hardwareBacked: signer.isHardwareBacked
+                offer: offer, signPub: signer.publicKey, kemPub: kemPub, phoneNonce: try Pairing.freshNonce(),
+                hardwareBacked: signer.isHardwareBacked
             )
             guard let claim = pairing.claim(phoneName: phoneName, token: token, device: currentDevice) else {
                 throw RelayError.failed
@@ -341,6 +393,17 @@ final class AppModel {
             forget(id)
             if inSheet { pairingFlow = .otherPhoneAccepted(hostName: name) }
             UINotificationFeedbackGenerator().notificationOccurred(.error)
+        case .failure(.codeWasSteered):
+            // Whoever wrote the pairing code tried to choose the code.
+            forget(id)
+            if inSheet { pairingFlow = .steered(hostName: name) }
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        case .failure(.badOffer):
+            // Left unfinished by an older version of the app.
+            forget(id)
+            if inSheet {
+                pairingFlow = .failed("That pairing was started by an older version of this app. Run the pairing command on the computer again.")
+            }
         case .failure:
             // The relay says "active" without the computer's confirmation of
             // this phone's keys. Do not believe it.

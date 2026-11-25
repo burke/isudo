@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use isudo_client::relay::{Relay, RelayError};
 use isudo_core::config::{self, Pairing, DEFAULT_SECURE_PATH, DEFAULT_TIMEOUT_SECS};
-use isudo_core::pairing::{self as pairing_host, Accepted, ClaimError, Pinned};
+use isudo_core::pairing::{Accepted, ClaimError, HostIdentity, Opening, Pinned};
 use isudo_core::plan::HostKey;
 use isudo_proto::api::{Ack, ClaimView, Confirm, CreatePairing, Revoke};
 use isudo_proto::codec::{b64_encode, hex_encode};
-use isudo_proto::pairing::{Offer, MAX_NAME_LEN};
+use isudo_proto::pairing::MAX_NAME_LEN;
 use isudo_proto::text::escape;
 use isudo_proto::{sigs, PUBKEY_LEN};
 use qrcode::render::unicode::Dense1x2;
@@ -44,7 +44,7 @@ fn generate_host_key() -> Result<([u8; 32], HostKey, [u8; PUBKEY_LEN]), String> 
     // A random 32-byte string is a valid P-256 scalar except with
     // negligible probability; a few tries is already overcautious.
     for _ in 0..8 {
-        let scalar: [u8; 32] = isudo_client::random().map_err(|e| format!("cannot get random bytes: {e}"))?;
+        let scalar: [u8; 32] = random()?;
         if let Some(key) = HostKey::new(&scalar) {
             if let Some(public) = key.public() {
                 return Ok((scalar, key, public));
@@ -52,6 +52,10 @@ fn generate_host_key() -> Result<([u8; 32], HostKey, [u8; PUBKEY_LEN]), String> 
         }
     }
     Err("could not generate a key".to_owned())
+}
+
+fn random<const N: usize>() -> Result<[u8; N], String> {
+    isudo_client::random().map_err(|e| format!("cannot get random bytes: {e}"))
 }
 
 fn show_qr(link: &str) {
@@ -103,8 +107,8 @@ fn confirm_code(accepted: &Accepted) -> Result<Pinned, String> {
         }
     }
     Err("the code did not match, so nothing was changed.\n\
-         If your phone showed an error or a different code, someone else may have scanned the QR code first; \
-         run the command again somewhere it cannot be seen."
+         If your phone showed an error or a different code, someone else may have answered the pairing code, \
+         or your phone was shown a different one. Run the command again somewhere it cannot be seen or altered."
         .to_owned())
 }
 
@@ -157,13 +161,15 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
         return Err(format!("--name must be at most {MAX_NAME_LEN} bytes"));
     }
     let (host_scalar, host_key, host_pub) = generate_host_key()?;
-    let offer = Offer {
-        relay_url: relay_url.to_owned(),
-        pairing_id: isudo_client::random().map_err(|e| format!("cannot get random bytes: {e}"))?,
-        host_pub,
-        secret: isudo_client::random().map_err(|e| format!("cannot get random bytes: {e}"))?,
-        host_name: host_name.clone(),
-    };
+    // The nonce is fixed now, before anything is shown, and the pairing code
+    // commits to it. It is revealed only to the one answer accepted below.
+    let opening = Opening::new(
+        HostIdentity { relay_url: relay_url.to_owned(), host_pub, host_name: host_name.clone() },
+        random()?,
+        random()?,
+        random()?,
+    );
+    let offer = opening.offer().clone();
     let pairing_id = hex_encode(&offer.pairing_id);
 
     // Build and validate the pairing file's contents before involving the
@@ -200,8 +206,7 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
     say("\nThis code is a secret until pairing finishes. Waiting for a phone...");
 
     let claim = await_claim(&relay, &pairing_id)?;
-    let ack_nonce = isudo_client::random().map_err(|e| format!("cannot get random bytes: {e}"))?;
-    let accepted = pairing_host::accept(&offer, &claim, ack_nonce).map_err(|e| match e {
+    let accepted = opening.accept(&claim).map_err(|e| match e {
         ClaimError::Malformed => "the phone's answer was malformed; nothing was changed".to_owned(),
         // Whoever answered did not have the QR code's secret: not a phone
         // that scanned it. The relay itself is the likeliest source.
@@ -212,13 +217,13 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
     // Tell that phone, and only that phone, that its answer is the one
     // accepted. It will not show a code until it has verified this.
     let ack = Ack {
-        nonce: b64_encode(accepted.ack_nonce()),
-        host_sig: b64_encode(&host_key.sign(&accepted.ack_message(&offer.pairing_id))),
+        nonce: b64_encode(accepted.host_nonce()),
+        host_sig: b64_encode(&host_key.sign(&accepted.ack_message())),
     };
     relay.acknowledge(&pairing_id, &ack).map_err(|e| e.to_string())?;
     let shown_name = escape(accepted.phone_name().as_bytes());
     say(&format!("\n{shown_name} scanned the code and will now show six digits."));
-    say("If your phone shows an error instead, press Control-C: someone else answered first.");
+    say("If your phone shows an error instead, press Control-C: the answer did not come from your phone.");
     let pinned = confirm_code(&accepted)?;
 
     pairing.phone_sign_pub = *pinned.phone_sign_pub();

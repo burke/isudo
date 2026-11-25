@@ -7,7 +7,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::{ACK_NONCE_LEN, PAIRING_ID_LEN, PUBKEY_LEN, REQUEST_ID_LEN};
+use crate::{HOST_NONCE_LEN, PAIRING_ID_LEN, PHONE_NONCE_LEN, PUBKEY_LEN, REQUEST_ID_LEN};
 
 pub const CTX_REQUEST: &[u8] = b"isudo/v1/request\0";
 pub const CTX_TICKET: &[u8] = b"isudo/v1/ticket\0";
@@ -75,19 +75,19 @@ pub fn envelope_info(pairing_id: &[u8; PAIRING_ID_LEN]) -> Vec<u8> {
 
 /// Signed by the host key as soon as it accepts a phone's answer.
 ///
-/// The phone shows its code only after verifying this over its own keys,
-/// which is what makes the code meaningful: a phone whose keys the host did
-/// not receive never has a code to show. The nonce is chosen by the host
-/// after it has seen the phone's keys, and the code is derived from it, so
-/// nobody can search for keys that produce a wanted code.
+/// The phone shows its code only after verifying this over its own keys and
+/// its own nonce, which is what makes the code meaningful: a phone whose
+/// answer the host did not receive never has a code to show. The message
+/// also reveals the host's nonce, which the pairing code committed to.
 #[must_use]
 pub fn pair_ack_msg(
     pairing_id: &[u8; PAIRING_ID_LEN],
     phone_sign_pub: &[u8; PUBKEY_LEN],
     phone_kem_pub: &[u8; PUBKEY_LEN],
-    nonce: &[u8; ACK_NONCE_LEN],
+    phone_nonce: &[u8; PHONE_NONCE_LEN],
+    host_nonce: &[u8; HOST_NONCE_LEN],
 ) -> Vec<u8> {
-    [CTX_PAIR_ACK, pairing_id.as_slice(), phone_sign_pub, phone_kem_pub, nonce].concat()
+    [CTX_PAIR_ACK, pairing_id.as_slice(), phone_sign_pub, phone_kem_pub, phone_nonce, host_nonce].concat()
 }
 
 /// Signed by the host key once the operator has confirmed the pairing code.

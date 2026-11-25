@@ -101,11 +101,17 @@ fn build() -> Option<Value> {
     let phone_sign_pub = public_of(&phone)?;
     let (kem_private, phone_kem_pub) = envelope::derive(&[0x03; 32]).ok()?;
 
+    let host_nonce = [0x4e_u8; 16];
+    let phone_nonce = [0x70_u8; 16];
+    // A nonce the pairing code did not commit to, signed by the host key all
+    // the same: what a pairing code written to steer the code would send.
+    let other_nonce = [0x4f_u8; 16];
     let offer = Offer {
         relay_url: "https://relay.example:8443/base path".into(),
         pairing_id: [0xa1; 16],
         host_pub,
         secret: [0x3c; 32],
+        commitment: pairing::commitment(&[0xa1; 16], &host_pub, &host_nonce),
         host_name: "burke\u{2019}s mbp".into(),
     };
     let parties = Parties {
@@ -115,7 +121,8 @@ fn build() -> Option<Value> {
         phone_kem_pub: &phone_kem_pub,
     };
     let phone_name = "Burke\u{2019}s iPhone";
-    let ack_nonce = [0x4e_u8; 16];
+    let ack = sigs::pair_ack_msg(&offer.pairing_id, &phone_sign_pub, &phone_kem_pub, &phone_nonce, &host_nonce);
+    let steered = sigs::pair_ack_msg(&offer.pairing_id, &phone_sign_pub, &phone_kem_pub, &phone_nonce, &other_nonce);
 
     let request = request(offer.pairing_id);
     let bytes = request.encode().ok()?;
@@ -142,10 +149,13 @@ fn build() -> Option<Value> {
 
     let link = offer.to_url();
     let invalid_links = vec![
-        link.replace("v=1", "v=2"),
+        link.replace("v=2", "v=3"),
+        // The previous version, which carried no commitment.
+        link.replace("v=2", "v=1").split('&').filter(|f| !f.starts_with("c=")).collect::<Vec<_>>().join("&"),
+        link.split('&').filter(|f| !f.starts_with("c=")).collect::<Vec<_>>().join("&"),
         [link.as_str(), "&x=1"].concat(),
-        [link.as_str(), "&v=1"].concat(),
-        "https://example.com/?v=1".to_owned(),
+        [link.as_str(), "&v=2"].concat(),
+        "https://example.com/?v=2".to_owned(),
     ];
     let plaintext = [host_sig.as_slice(), &bytes].concat();
     let trailing = [bytes.as_slice(), &[0]].concat();
@@ -176,7 +186,7 @@ fn build() -> Option<Value> {
             "deny_reason": reason,
             "deny_hex": hex_encode(&sigs::deny_msg(&digest, reason.as_bytes())),
             "deny_empty_hex": hex_encode(&sigs::deny_msg(&digest, b"")),
-            "pair_ack_hex": hex_encode(&sigs::pair_ack_msg(&offer.pairing_id, &phone_sign_pub, &phone_kem_pub, &ack_nonce)),
+            "pair_ack_hex": hex_encode(&ack),
             "pair_confirm_hex": hex_encode(&sigs::pair_confirm_msg(&offer.pairing_id, &phone_sign_pub, &phone_kem_pub)),
             "envelope_info_hex": hex_encode(&sigs::envelope_info(&offer.pairing_id)),
         },
@@ -184,8 +194,8 @@ fn build() -> Option<Value> {
             "comment": "ECDSA P-256 over SHA-256 of the message, raw r||s",
             "host_pub_b64": b64_encode(&host_pub),
             "host_request_sig_b64": b64_encode(&host_sig),
-            "pair_ack_sig_b64": b64_encode(&sign(
-                &host, &sigs::pair_ack_msg(&offer.pairing_id, &phone_sign_pub, &phone_kem_pub, &ack_nonce))),
+            "pair_ack_sig_b64": b64_encode(&sign(&host, &ack)),
+            "pair_ack_uncommitted_sig_b64": b64_encode(&sign(&host, &steered)),
             "pair_confirm_sig_b64": b64_encode(&sign(
                 &host, &sigs::pair_confirm_msg(&offer.pairing_id, &phone_sign_pub, &phone_kem_pub))),
             "phone_sign_pub_b64": b64_encode(&phone_sign_pub),
@@ -202,9 +212,13 @@ fn build() -> Option<Value> {
             "phone_sign_pub_b64": b64_encode(&phone_sign_pub),
             "phone_kem_pub_b64": b64_encode(&phone_kem_pub),
             "phone_name": phone_name,
-            "claim_mac_b64": b64_encode(&pairing::claim_mac(&offer.secret, &parties, phone_name.as_bytes())),
-            "ack_nonce_b64": b64_encode(&ack_nonce),
-            "confirmation_code": pairing::confirmation_code(&offer.secret, &parties, &ack_nonce),
+            "commitment_b64": b64_encode(&offer.commitment),
+            "host_nonce_b64": b64_encode(&host_nonce),
+            "uncommitted_nonce_b64": b64_encode(&other_nonce),
+            "phone_nonce_b64": b64_encode(&phone_nonce),
+            "claim_mac_b64": b64_encode(&pairing::claim_mac(
+                &offer.secret, &parties, &phone_nonce, phone_name.as_bytes())),
+            "confirmation_code": pairing::confirmation_code(&offer.secret, &parties, &host_nonce, &phone_nonce),
             "invalid_links": invalid_links,
         },
         "envelope": {

@@ -112,6 +112,11 @@ final class EndToEndTests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.typeText(link)
         app.alerts.buttons["Pair"].tap()
+        // Nothing is sent until the person agrees to the computer named.
+        let agree = app.buttons["Pair with this computer"]
+        XCTAssertTrue(agree.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["e2e-host"].exists)
+        agree.tap()
 
         // The code the person would read off the phone and type.
         let code = app.otherElements.matching(NSPredicate(format: "label BEGINSWITH 'Code '")).firstMatch

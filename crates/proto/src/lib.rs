@@ -28,8 +28,13 @@ pub const SIG_LEN: usize = 64;
 pub const PAIRING_ID_LEN: usize = 16;
 /// Length of a request identifier.
 pub const REQUEST_ID_LEN: usize = 16;
-/// Length of the nonce in a pairing acknowledgement.
-pub const ACK_NONCE_LEN: usize = 16;
+/// Length of the host's pairing nonce: committed to in the pairing code,
+/// revealed in the acknowledgement.
+pub const HOST_NONCE_LEN: usize = 16;
+/// Length of the phone's pairing nonce, sent with its answer.
+pub const PHONE_NONCE_LEN: usize = 16;
+/// Length of the commitment to the host's pairing nonce.
+pub const COMMITMENT_LEN: usize = 32;
 /// Length of a request nonce.
 pub const NONCE_LEN: usize = 32;
 

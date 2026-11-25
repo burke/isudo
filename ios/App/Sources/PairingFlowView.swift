@@ -12,6 +12,8 @@ struct PairingFlowView: View {
                 switch model.pairingFlow {
                 case .scanning, nil:
                     ScanStep()
+                case .confirming(let offer, let source):
+                    ConfirmStep(offer: offer, source: source)
                 case .contacting(let hostName):
                     VStack(spacing: 16) {
                         ProgressView().controlSize(.large)
@@ -26,6 +28,12 @@ struct PairingFlowView: View {
                         symbol: "exclamationmark.octagon.fill", tint: Theme.risk,
                         title: "\(hostName) accepted a different phone",
                         message: "This phone is not paired, and has no code to show.\n\nDo not type any code into the computer. Press Control-C there, then run the pairing command again somewhere the QR code cannot be seen."
+                    )
+                case .steered(let hostName):
+                    ResultStep(
+                        symbol: "exclamationmark.octagon.fill", tint: Theme.risk,
+                        title: "That pairing code is not genuine",
+                        message: "It claimed to be from \(hostName) and tried to choose the code this phone would show, which a real computer never does. This phone is not paired.\n\nDo not type any code into a computer. If you are pairing one now, press Control-C there and start again where its screen and clipboard cannot be interfered with."
                     )
                 case .alreadyClaimed(let hostName):
                     ResultStep(
@@ -51,7 +59,7 @@ struct PairingFlowView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     switch model.pairingFlow {
-                    case .paired, .failed, .alreadyClaimed, .otherPhoneAccepted:
+                    case .paired, .failed, .alreadyClaimed, .otherPhoneAccepted, .steered:
                         EmptyView()
                     default:
                         Button("Cancel") { model.cancelPairing() }
@@ -77,7 +85,7 @@ private struct ScanStep: View {
         VStack(spacing: 20) {
             if canScan {
                 ScannerView { scanned in
-                    Task { await model.beginPairing(link: scanned) }
+                    model.review(link: scanned, source: .scan)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                 .overlay {
@@ -95,7 +103,7 @@ private struct ScanStep: View {
             }
             Button {
                 if let pasted = UIPasteboard.general.string, pasted.contains("isudo://pair") {
-                    Task { await model.beginPairing(link: pasted) }
+                    model.review(link: pasted, source: .paste)
                 } else {
                     pasting = true
                 }
@@ -109,11 +117,77 @@ private struct ScanStep: View {
             TextField("isudo://pair?…", text: $link)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            Button("Pair") { Task { await model.beginPairing(link: link) } }
+            Button("Pair") { model.review(link: link, source: .paste) }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Paste the link printed under the QR code.")
         }
+    }
+}
+
+/// A pairing code has been read. Before this phone makes keys or contacts
+/// anything, the person sees which computer and relay it names and decides.
+///
+/// The name is only what the pairing code says, and anyone can write a
+/// pairing code. What makes pairing safe is the six-digit code that follows;
+/// this step is so that nothing happens behind the person's back, least of
+/// all because some link was opened.
+private struct ConfirmStep: View {
+    @Environment(AppModel.self) private var model
+    let offer: PairingOffer
+    let source: OfferSource
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            SymbolBadge(symbol: "desktopcomputer", size: 88)
+            Text("Pair with this computer?")
+                .font(.title2.weight(.bold))
+                .multilineTextAlignment(.center)
+                .padding(.top, 24)
+            VStack(alignment: .leading, spacing: 12) {
+                detail("Computer", offer.hostName)
+                Divider()
+                detail("Relay", offer.relayURL)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(.top, 24)
+            if source == .link {
+                Label {
+                    Text("This pairing code came from a link opened on this phone, not from scanning a screen. Any app or web page can open one.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.risk)
+                }
+                .font(.subheadline)
+                .padding(.top, 18)
+            }
+            Text("Continue only if you ran the pairing command on that computer yourself, just now. Nothing has been sent yet.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.top, 18)
+            Spacer()
+            Button {
+                Task { await model.confirmPairing() }
+            } label: {
+                Text("Pair with this computer").fontWeight(.semibold).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glassProminent)
+            .controlSize(.large)
+        }
+    }
+
+    private func detail(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            // Shown as text, never as Markdown or a link.
+            Text(verbatim: value)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

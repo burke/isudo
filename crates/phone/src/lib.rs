@@ -18,7 +18,10 @@ use isudo_proto::api::{Answer, Claim, Decision, DeviceUpdate, PairingState, Pair
 use isudo_proto::codec::{b64_decode, b64_decode_array, b64_encode, hex_decode_array, hex_encode};
 use isudo_proto::pairing::{self, Offer, Parties};
 use isudo_proto::request::Request;
-use isudo_proto::{sigs, ACK_NONCE_LEN, MAX_REASON_LEN, PAIRING_ID_LEN, PUBKEY_LEN, REQUEST_ID_LEN, SIG_LEN};
+use isudo_proto::{
+    sigs, COMMITMENT_LEN, HOST_NONCE_LEN, MAX_REASON_LEN, PAIRING_ID_LEN, PHONE_NONCE_LEN, PUBKEY_LEN, REQUEST_ID_LEN,
+    SIG_LEN,
+};
 use p256::ecdsa::signature::{Signer as _, Verifier as _};
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use sha2::{Digest as _, Sha256};
@@ -75,6 +78,10 @@ pub enum PairingError {
     /// acknowledgement is missing or does not cover this phone's keys.
     /// Someone else answered the pairing, or the relay is lying.
     AnotherPhoneWasAccepted,
+    /// The acknowledgement reveals a nonce that the pairing code did not
+    /// commit to. Whoever wrote the pairing code is trying to choose the
+    /// code this phone shows, which an honest computer never does.
+    CodeWasSteered,
     /// The relay says the pairing is active, but the host's signature over
     /// this phone's keys is missing or wrong.
     NotConfirmedByHost,
@@ -88,12 +95,24 @@ impl fmt::Display for PairingError {
             Self::AnotherPhoneWasAccepted => {
                 "the computer accepted a different phone; do not enter any code there, and cancel pairing"
             }
+            Self::CodeWasSteered => {
+                "this pairing code did not come from an honest computer; do not enter any code, and cancel pairing"
+            }
             Self::NotConfirmedByHost => "the computer has not confirmed this pairing",
         })
     }
 }
 
 impl std::error::Error for PairingError {}
+
+/// The first `N` bytes of a derived value.
+fn first<const N: usize>(bytes: &[u8; 32]) -> [u8; N] {
+    let mut out = [0; N];
+    for (dst, src) in out.iter_mut().zip(bytes) {
+        *dst = *src;
+    }
+    out
+}
 
 fn derive(seed: &[u8; 32], purpose: &[u8]) -> [u8; 32] {
     let mut hash = Sha256::new();
@@ -123,13 +142,17 @@ pub struct Pairing {
     host_name: String,
     relay_url: String,
     secret: [u8; pairing::SECRET_LEN],
+    /// The pairing code's commitment to the host's nonce.
+    commitment: [u8; COMMITMENT_LEN],
+    /// This phone's nonce, chosen after the pairing code was read.
+    phone_nonce: [u8; PHONE_NONCE_LEN],
     sign_key: SigningKey,
     sign_pub: [u8; PUBKEY_LEN],
     kem_private: [u8; envelope::PRIVATE_KEY_LEN],
     kem_pub: [u8; PUBKEY_LEN],
     token: String,
-    /// The nonce from the host's acknowledgement, once verified.
-    ack_nonce: Option<[u8; ACK_NONCE_LEN]>,
+    /// The host's nonce, once its acknowledgement has been verified.
+    host_nonce: Option<[u8; HOST_NONCE_LEN]>,
     active: bool,
     seen: BTreeSet<[u8; REQUEST_ID_LEN]>,
 }
@@ -157,12 +180,14 @@ impl Pairing {
             host_name: offer.host_name.clone(),
             relay_url: offer.relay_url.clone(),
             secret: offer.secret,
+            commitment: offer.commitment,
+            phone_nonce: first(&derive(seed, b"nonce")),
             sign_key,
             sign_pub,
             kem_private,
             kem_pub,
             token: b64_encode(&derive(seed, b"token")),
-            ack_nonce: None,
+            host_nonce: None,
             active: false,
             seen: BTreeSet::new(),
         })
@@ -227,52 +252,67 @@ impl Pairing {
             phone_sign_pub: b64_encode(&self.sign_pub),
             phone_kem_pub: b64_encode(&self.kem_pub),
             phone_name: phone_name.to_owned(),
-            claim_mac: b64_encode(&pairing::claim_mac(&self.secret, &self.parties(), phone_name.as_bytes())),
+            phone_nonce: b64_encode(&self.phone_nonce),
+            claim_mac: b64_encode(&pairing::claim_mac(
+                &self.secret,
+                &self.parties(),
+                &self.phone_nonce,
+                phone_name.as_bytes(),
+            )),
             phone_token: self.token.clone(),
             device,
         }
     }
 
     /// The six digits the person types into the host, available only once
-    /// the host has acknowledged this phone's own keys.
+    /// the host has acknowledged this phone's own answer.
     ///
     /// That ordering is what the code's meaning rests on: a phone whose keys
     /// were swapped in transit never gets the host's signature and so never
-    /// has a code to show. The code also depends on the host's nonce, chosen
-    /// after the keys were fixed, so it cannot be matched by trying keys.
+    /// has a code to show. The code depends on both nonces: the host's,
+    /// which the pairing code committed to before this phone chose its own,
+    /// and this phone's. So neither side could have chosen it.
     #[must_use]
     pub fn code(&self) -> Option<String> {
-        let nonce = self.ack_nonce.as_ref()?;
-        Some(pairing::confirmation_code(&self.secret, &self.parties(), nonce))
+        let host_nonce = self.host_nonce.as_ref()?;
+        Some(pairing::confirmation_code(&self.secret, &self.parties(), host_nonce, &self.phone_nonce))
     }
 
     /// Advances the pairing from what the relay reports, believing only the
     /// host's signatures.
     ///
     /// - The code is released only on the host's acknowledgement of this
-    ///   phone's own keys.
+    ///   phone's own keys and nonce, revealing the nonce the pairing code
+    ///   committed to.
     /// - The pairing becomes active only on the host's confirmation of them.
     ///
     /// # Errors
     /// Fails if the relay reports progress that the host's signatures do not
-    /// back up. `AnotherPhoneWasAccepted` in particular means the person must
-    /// not continue on the host.
+    /// back up. `AnotherPhoneWasAccepted` and `CodeWasSteered` in particular
+    /// mean the person must not continue on the host.
     pub fn observe(&mut self, status: &PairingStatus) -> Result<Progress, PairingError> {
         if self.active {
             return Ok(Progress::Active);
         }
-        if self.ack_nonce.is_none() {
+        if self.host_nonce.is_none() {
             let claims_progress = matches!(status.state, PairingState::Acknowledged | PairingState::Active);
             let Some(ack) = &status.ack else {
                 return if claims_progress { Err(PairingError::AnotherPhoneWasAccepted) } else { Ok(Progress::Waiting) };
             };
-            let nonce: [u8; ACK_NONCE_LEN] =
+            let nonce: [u8; HOST_NONCE_LEN] =
                 b64_decode_array(&ack.nonce).map_err(|_e| PairingError::AnotherPhoneWasAccepted)?;
-            let message = sigs::pair_ack_msg(&self.id, &self.sign_pub, &self.kem_pub, &nonce);
+            let message = sigs::pair_ack_msg(&self.id, &self.sign_pub, &self.kem_pub, &self.phone_nonce, &nonce);
             if !self.host_signed(&message, &ack.host_sig) {
                 return Err(PairingError::AnotherPhoneWasAccepted);
             }
-            self.ack_nonce = Some(nonce);
+            // The holder of the host key signed for this phone's answer.
+            // The nonce must also be the one fixed before this phone
+            // answered; otherwise it could have been picked, after seeing
+            // this phone's nonce, to make the code come out as wanted.
+            if pairing::commitment(&self.id, &self.host_pub, &nonce) != self.commitment {
+                return Err(PairingError::CodeWasSteered);
+            }
+            self.host_nonce = Some(nonce);
         }
         if status.state == PairingState::Active {
             let message = sigs::pair_confirm_msg(&self.id, &self.sign_pub, &self.kem_pub);

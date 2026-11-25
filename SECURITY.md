@@ -28,9 +28,13 @@ tamper with the unprivileged helper, and controls the relay and the network:
    Nothing the relay or the helper says reaches the caller's terminal as
    free text.
 5. Every failure before `execve` ends without running the command.
-6. The computer pins a phone's key only if that phone is the one whose code
-   the person at the computer typed, even against someone who runs the relay
-   and saw the QR code.
+6. The computer pins a phone's key only if that phone read this computer's
+   pairing code and is the one whose six digits the person at the computer
+   typed. This holds against someone who runs the relay, saw the pairing
+   code, and can put a pairing code of their own in front of the phone (a
+   link, a synced clipboard, another QR code). Their one remaining move is a
+   blind guess at six digits: one chance in a million, and each try needs
+   the person to agree on the phone and then type a code that fails.
 
 A way to break any of these is a vulnerability.
 
@@ -44,6 +48,15 @@ These are documented limits, not bugs:
 - Other routes to root on the same machine (passwordless `sudo`, the
   `docker` group, a writable shell startup file).
 - A person approving a request without reading it.
+- Pairing while something hostile can type into the terminal running
+  `isudo-admin pair`. Pairing takes whoever types the six digits to be the
+  person holding the phone. (Anything that can do that can usually ride the
+  `sudo` session you paired with anyway.)
+- A phone paired with something other than your computer. Anyone can write
+  a pairing code, and a phone that answers one will show that "computer's"
+  requests. The app asks before answering a pairing code and says when one
+  arrived as a link. Approvals given to such a pairing mean nothing to any
+  real computer.
 - Denial of service by the relay, the network or the helper: any of them
   can stop approvals arriving.
 - An attacker who already has root, or the phone's unlocked Secure Enclave
@@ -53,5 +66,6 @@ These are documented limits, not bugs:
 
 `crates/isudo` is the only code that runs as root. `crates/core` holds the
 decisions it relies on, with no `unsafe` and no I/O. `formal/isudo.pv` is
-the protocol model. `tests/setuid/run.sh` is the test that runs the real
-setuid binary.
+the protocol model, and `crates/sim/src/pairing_tests.rs` replays the known
+pairing attacks against the real code. `tests/setuid/run.sh` is the test
+that runs the real setuid binary.

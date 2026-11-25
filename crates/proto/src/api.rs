@@ -36,6 +36,9 @@ pub struct Claim {
     pub phone_sign_pub: String,
     pub phone_kem_pub: String,
     pub phone_name: String,
+    /// Random value the phone chose after reading the pairing code. The
+    /// six-digit code depends on it.
+    pub phone_nonce: String,
     pub claim_mac: String,
     /// Bearer token the phone will use for this pairing from now on.
     pub phone_token: String,
@@ -50,12 +53,14 @@ pub struct ClaimView {
     pub phone_sign_pub: String,
     pub phone_kem_pub: String,
     pub phone_name: String,
+    pub phone_nonce: String,
     pub claim_mac: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ack {
-    /// Random value chosen by the host after it accepted the phone's answer.
+    /// The host's nonce, revealed. The pairing code committed to it before
+    /// any phone answered.
     pub nonce: String,
     /// Host signature over `sigs::pair_ack_msg`.
     pub host_sig: String,

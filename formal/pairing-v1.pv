@@ -1,0 +1,83 @@
+(*
+  The second pairing design, kept as a record of why it was changed.
+
+  It added the acknowledgement that pairing-v0.pv lacked: the phone showed
+  its code only after the host had signed for the phone's own key. The host
+  chose a fresh nonce when it acknowledged, and the code was derived from
+  that nonce. The pairing code carried no commitment and the phone
+  contributed no nonce.
+
+  A model of this design, with an attacker who could read every pairing code
+  but could not replace one, proved the property below. The design shipped.
+  An audit then found that the assumption was wrong: a phone can be shown a
+  pairing code of the attacker's (a link opened on the phone, a clipboard
+  that syncs to it, a QR code drawn over the real one).
+
+  This file is that design under the attacker of isudo.pv: the phone takes
+  its pairing code from the public channel, and the person carries only six
+  digits. ProVerif finds the attack:
+
+  1. The attacker answers the real pairing code with a key of its own. The
+     host acknowledges, revealing the nonce its code depends on.
+  2. The attacker gives the person's phone a pairing code naming the same
+     pairing, with the attacker's own key as the host key.
+  3. The phone answers. The attacker, being that pairing code's "host",
+     signs an acknowledgement carrying the real host's nonce.
+  4. The phone shows the code the real host is waiting for. The person types
+     it. The host pins the attacker's key.
+
+  (In the implementation the code also covered the keys, so step 3 took a
+  search over nonces: about a million tries. The model's code binds no key,
+  which stands for exactly that.)
+
+  check.sh expects this query to FAIL.
+*)
+
+free c: channel.
+free human: channel [private].
+
+type skey.
+type pkey.
+
+fun pk(skey): pkey.
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; checksign(sign(m, k), pk(k)) = m.
+fun mac(bitstring, bitstring): bitstring.
+fun shortcode(bitstring, bitstring, bitstring): bitstring.   (* (pairing, secret, nonce): binds no key *)
+
+const tagAck, tagConfirm: bitstring.
+
+event PhoneKey(pkey).                (* some phone made this key *)
+event Pinned(bitstring, pkey).
+
+(* The weakest thing one could ask: the key the host pins is a phone's. *)
+query p: bitstring, k: pkey; event(Pinned(p, k)) ==> event(PhoneKey(k)).
+
+let Host() =
+  new skH: skey;
+  new qrsecret: bitstring;
+  new pid: bitstring;
+  let pkH = pk(skH) in
+  out(c, (pid, pkH, qrsecret));
+  in(c, (=pid, pkP: pkey, m: bitstring)) [precise];
+  if m = mac((pid, pkH, pkP), qrsecret) then
+  new ackNonce: bitstring;                     (* chosen when acknowledging *)
+  out(c, (ackNonce, sign((tagAck, pid, pkP, ackNonce), skH)));
+  in(human, typed: bitstring) [precise];
+  if typed = shortcode(pid, qrsecret, ackNonce) then
+  event Pinned(pid, pkP);
+  out(c, sign((tagConfirm, pid, pkP), skH)).
+
+let Phone() =
+  in(c, (pid: bitstring, pkH: pkey, qrsecret: bitstring));   (* whatever it is shown *)
+  new skP: skey;
+  let pkP = pk(skP) in
+  event PhoneKey(pkP);
+  out(c, (pid, pkP, mac((pid, pkH, pkP), qrsecret)));
+  in(c, (ackNonce: bitstring, ack: bitstring));
+  let (=tagAck, =pid, =pkP, =ackNonce) = checksign(ack, pkH) in
+  out(human, shortcode(pid, qrsecret, ackNonce)).
+
+process
+    ( !Host() )
+  | ( !Phone() )

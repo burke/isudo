@@ -23,6 +23,8 @@ public enum API {
         public var phoneSignPub: String
         public var phoneKemPub: String
         public var phoneName: String
+        /// Random value this phone chose after reading the pairing code.
+        public var phoneNonce: String
         public var claimMac: String
         public var phoneToken: String
         public var device: DeviceUpdate?
@@ -31,6 +33,7 @@ public enum API {
             case phoneSignPub = "phone_sign_pub"
             case phoneKemPub = "phone_kem_pub"
             case phoneName = "phone_name"
+            case phoneNonce = "phone_nonce"
             case claimMac = "claim_mac"
             case phoneToken = "phone_token"
             case device

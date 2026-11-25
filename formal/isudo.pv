@@ -5,12 +5,15 @@
 
   What is modelled
   ----------------
-  Pairing: the host shows a QR code (its public key and a one-time secret);
-  the phone answers with its public key and a MAC under the secret; the host
-  acknowledges the answer it accepted with a signature over that key and a
-  fresh nonce; the phone, having verified that acknowledgement over its own
-  key, shows a short code derived from the nonce; the person types the code
-  into the host; the host pins the phone's key and signs a confirmation.
+  Pairing: the host picks a nonce and shows a pairing code (its public key,
+  a one-time secret, and a commitment to the nonce); the phone picks a nonce
+  of its own and answers with its public key, its nonce and a MAC under the
+  secret; the host acknowledges the one answer it accepts with a signature
+  over that key and nonce, revealing its own nonce; the phone, having
+  verified that acknowledgement over its own answer and checked the revealed
+  nonce against the commitment, shows a short code derived from the two
+  nonces; the person types the code into the host; the host pins the
+  phone's key and signs a confirmation.
 
   Approval: the host signs a request (a fresh nonce and the command); the
   phone, having verified the host's signature, shows it; the person approves
@@ -20,33 +23,64 @@
   The attacker
   ------------
   Controls the network and the relay (everything is sent on the public
-  channel), chooses every command (the caller is hostile), and SEES EVERY QR
-  CODE, so the pairing secret is public knowledge in this model. The host's
-  private key is handed to the attacker once pairing has finished.
+  channel) and chooses every command (the caller is hostile).
+
+  SEES EVERY PAIRING CODE, so the pairing secret is public knowledge in this
+  model, and CHOOSES WHICH PAIRING CODE EACH PHONE READS: a phone takes its
+  pairing code from the public channel. That covers a link opened on the
+  phone, a clipboard that syncs to it, and a QR code drawn over the real
+  one. The attacker can write pairing codes of its own, naming keys it
+  holds.
+
+  The host's private key is handed to the attacker once pairing has
+  finished.
+
+  The person
+  ----------
+  Reads six digits off their phone and types them into a computer. That is
+  all the `human` channel carries: the person does not know which pairing
+  the digits belong to, so any host may be given any phone's code.
 
   The short code
   --------------
-  Six digits can be matched by trial: an attacker who knows the secret can
-  find keys of its own whose code equals any target. The model gives the
-  attacker that power outright by making the code independent of every key:
-  it depends only on the pairing, the secret and the host's nonce. So
-  whatever the properties below owe to the code, they owe to two things
-  only: the person has a code to type only if their own phone showed one,
-  and the code is tied to a nonce the host chose for one acknowledgement.
+  Six digits can be matched by trial: whoever is free to vary one of the
+  code's inputs, knowing the rest, can make it come out as they like. The
+  model gives the attacker that power outright over everything except the
+  two nonces: here the code depends only on the host's nonce and the
+  phone's. Keys, the pairing id and the secret are all treated as things an
+  attacker could compensate for. So whatever the properties below owe to
+  the code, they owe to the order in which the two nonces are fixed: the
+  host's by the commitment, before the phone chooses; the phone's before
+  the host reveals.
 
-  The earlier design
-  ------------------
-  pairing-v0.pv is the first design, in which the phone showed a code as
-  soon as it had scanned. check.sh runs it too and expects its property to
-  FAIL: that is the attack the acknowledgement was added to stop.
+  Because a phone may be shown a pairing code the attacker wrote, some
+  properties can only be about phones that read an honest host's key
+  (HonestHost). A phone paired with an attacker's "computer" is shown
+  whatever that attacker likes, and nothing can prevent it; what the model
+  proves is that this never leads anywhere at an honest host.
+
+  The earlier designs
+  -------------------
+  check.sh also runs two superseded designs and expects each one's property
+  to FAIL, which shows the model can find the attacks they fell to.
+  - pairing-v0.pv: the phone showed a code as soon as it had scanned. An
+    attacker who knew the secret answered first with keys whose code
+    matched.
+  - pairing-v1.pv: the acknowledgement existed, but the host chose its
+    nonce only when acknowledging and the pairing code carried no
+    commitment. This model assumed the attacker could read pairing codes
+    and not replace them, and proved that design safe. It was not: an
+    attacker who put a pairing code of their own in front of the phone
+    chose the nonce to suit, and the phone showed the code the real host
+    was waiting for. An audit found it; pairing-v1.pv reproduces it under
+    the attacker described above.
 
   Not modelled: confidentiality of requests (the HPKE envelope), the phone's
   second key, clocks and expiry, and everything about what a command does.
 *)
 
-free c: channel.              (* network and relay: the attacker's *)
-free qr: channel [private].   (* what the host's screen shows *)
-free human: channel [private].(* the person reading their phone and typing *)
+free c: channel.              (* network, relay, and every pairing code: the attacker's *)
+free human: channel [private].(* the person reading six digits off a phone and typing them *)
 
 type skey.
 type pkey.
@@ -58,20 +92,22 @@ reduc forall m: bitstring, k: skey; getmessage(sign(m, k)) = m.
 
 fun mac(bitstring, bitstring): bitstring.
 fun h(bitstring): bitstring.
-fun shortcode(bitstring, bitstring, bitstring): bitstring.   (* (pairing, secret, nonce): binds no key *)
+fun commit(bitstring, pkey, bitstring): bitstring.   (* (pairing, host key, host nonce): hides the nonce, fixes it *)
+fun shortcode(bitstring, bitstring): bitstring.      (* (host nonce, phone nonce): binds nothing else *)
 
 (* Distinct context tags, as in crates/proto/src/sigs.rs. *)
 const tagAck, tagConfirm, tagRequest, tagApprove, tagDeny: bitstring.
 
-event PhoneScanned(bitstring, pkey).       (* the person's phone made this key for this pairing *)
-event HostAccepted(bitstring, pkey).
-event CodeShown(bitstring, pkey).
-event Pinned(bitstring, pkey).             (* the host wrote this key into its pairing file *)
-event PhoneActive(bitstring, pkey).
-event HostKeyLeaked(bitstring).
+event HonestHost(pkey).                        (* this key belongs to a real host *)
+event PhoneScanned(bitstring, pkey, pkey).     (* a phone read a pairing code naming (pairing, host key) and made this key *)
+event HostAccepted(bitstring, pkey, pkey).     (* pairing, host key, phone key *)
+event CodeShown(bitstring, pkey, pkey).
+event Pinned(bitstring, pkey, pkey).           (* the host wrote this phone key into its pairing file *)
+event PhoneActive(bitstring, pkey, pkey).
+event HostKeyLeaked(pkey).
 
 event Asked(bitstring, bitstring, bitstring).            (* pairing, nonce, command *)
-event Shown(bitstring, bitstring, bitstring).
+event Shown(bitstring, pkey, bitstring, bitstring).      (* pairing, host key as the phone knows it, nonce, command *)
 event Approved(bitstring, bitstring, bitstring).
 event Denied(bitstring, bitstring, bitstring, bitstring).(* ..., reason *)
 event Exec(bitstring, bitstring, bitstring).
@@ -79,16 +115,22 @@ event DenialShown(bitstring, bitstring, bitstring, bitstring).
 
 (* ---- Pairing ---------------------------------------------------------- *)
 
-(* 1. The host pins a key only if the person's own phone made it. *)
-query p: bitstring, k: pkey; event(Pinned(p, k)) ==> event(PhoneScanned(p, k)).
+(* 1. The host pins a key only if a phone made that key after reading this
+      very host's pairing code. Not an attacker's key, and not the key of a
+      phone that was looking at some other pairing code. *)
+query p: bitstring, kh: pkey, k: pkey; event(Pinned(p, kh, k)) ==> event(PhoneScanned(p, kh, k)).
 
-(* 2. A phone has a code to show only if the host accepted that phone's key.
-      (Once pairing is over and the host's key has leaked, a phone scanning a
-      stale QR code can be shown anything; nothing is listening by then.) *)
-query p: bitstring, k: pkey; event(CodeShown(p, k)) ==> event(HostAccepted(p, k)) || event(HostKeyLeaked(p)).
+(* 2. A phone that read an honest host's pairing code has a code to show
+      only if that host accepted that phone's key. (Once pairing is over and
+      the host's key has leaked, a phone can be shown anything in that
+      host's name; nothing is listening by then.) *)
+query p: bitstring, kh: pkey, k: pkey;
+  event(CodeShown(p, kh, k)) && event(HonestHost(kh)) ==> event(HostAccepted(p, kh, k)) || event(HostKeyLeaked(kh)).
 
-(* 3. A phone considers itself paired only if the host pinned its key. *)
-query p: bitstring, k: pkey; event(PhoneActive(p, k)) ==> event(Pinned(p, k)) || event(HostKeyLeaked(p)).
+(* 3. A phone considers itself paired with an honest host only if that host
+      pinned its key. *)
+query p: bitstring, kh: pkey, k: pkey;
+  event(PhoneActive(p, kh, k)) && event(HonestHost(kh)) ==> event(Pinned(p, kh, k)) || event(HostKeyLeaked(kh)).
 
 (* ---- Approval --------------------------------------------------------- *)
 
@@ -98,9 +140,10 @@ query p: bitstring, n: bitstring, m: bitstring; event(Exec(p, n, m)) ==> event(A
 (* 5. Each run corresponds to its own, distinct ask: no replay, no reuse. *)
 query p: bitstring, n: bitstring, m: bitstring; inj-event(Exec(p, n, m)) ==> inj-event(Asked(p, n, m)).
 
-(* 6. The phone shows only requests the host made (unless the host's key leaked). *)
-query p: bitstring, n: bitstring, m: bitstring;
-  event(Shown(p, n, m)) ==> event(Asked(p, n, m)) || event(HostKeyLeaked(p)).
+(* 6. A phone paired with an honest host shows, in that host's name, only
+      requests that host made (unless the host's key leaked). *)
+query p: bitstring, kh: pkey, n: bitstring, m: bitstring;
+  event(Shown(p, kh, n, m)) && event(HonestHost(kh)) ==> event(Asked(p, n, m)) || event(HostKeyLeaked(kh)).
 
 (* 7. A denial reason reaches the caller only as the phone signed it. *)
 query p: bitstring, n: bitstring, m: bitstring, r: bitstring;
@@ -130,28 +173,26 @@ let Host() =
   new skH: skey;
   new qrsecret: bitstring;
   new pid: bitstring;
+  new hostNonce: bitstring;                      (* fixed before anything is shown *)
   let pkH = pk(skH) in
-  out(c, (pid, pkH));
-  ( !out(qr, (pid, pkH, qrsecret)) )
-  | (
-    in(c, (=pid, pkP: pkey, m: bitstring)) [precise];   (* one answer per offer *)
-    if m = mac((pid, pkH, pkP), qrsecret) then
-    event HostAccepted(pid, pkP);
-    new ackNonce: bitstring;                     (* chosen after the key arrived *)
-    out(c, (ackNonce, sign((tagAck, pid, pkP, ackNonce), skH)));
-    in(human, (=pid, typed: bitstring)) [precise];
-    if typed = shortcode(pid, qrsecret, ackNonce) then
-    event Pinned(pid, pkP);
-    out(c, sign((tagConfirm, pid, pkP), skH));
-    ( !HostAsk(pid, skH, pkP) )
-    | ( event HostKeyLeaked(pid); out(c, skH) )
-  ).
+  event HonestHost(pkH);
+  out(c, (pid, pkH, qrsecret, commit(pid, pkH, hostNonce)));   (* the pairing code; everyone sees it *)
+  in(c, (=pid, pkP: pkey, phoneNonce: bitstring, m: bitstring)) [precise];   (* one answer per pairing code *)
+  if m = mac((pid, pkH, pkP, phoneNonce), qrsecret) then
+  event HostAccepted(pid, pkH, pkP);
+  out(c, (hostNonce, sign((tagAck, pid, pkP, phoneNonce, hostNonce), skH)));   (* the nonce is revealed, once *)
+  in(human, typed: bitstring) [precise];
+  if typed = shortcode(hostNonce, phoneNonce) then
+  event Pinned(pid, pkH, pkP);
+  out(c, sign((tagConfirm, pid, pkP), skH));
+  ( !HostAsk(pid, skH, pkP) )
+  | ( event HostKeyLeaked(pkH); out(c, skH) ).
 
 (* The phone looking at one delivered request. *)
 let PhoneAnswer(pid: bitstring, pkH: pkey, skP: skey) =
   in(c, ((=pid, n: bitstring, cmd: bitstring), sig: bitstring));
   let (=tagRequest, =pid, =n, =cmd) = checksign(sig, pkH) in
-  event Shown(pid, n, cmd);
+  event Shown(pid, pkH, n, cmd);
   in(c, approves: bool);                       (* the person may do either *)
   if approves then (
     event Approved(pid, n, cmd);
@@ -162,23 +203,26 @@ let PhoneAnswer(pid: bitstring, pkH: pkey, skP: skey) =
     out(c, (reason, sign((tagDeny, h((pid, n, cmd)), reason), skP)))
   ).
 
-(* The person's phone: scans, pairs, then answers requests. *)
+(* The person's phone: reads a pairing code, pairs, then answers requests. *)
 let Phone() =
-  in(qr, (pid: bitstring, pkH: pkey, qrsecret: bitstring));
+  (* Whatever pairing code is put in front of it: the real one, or one the
+     attacker wrote. *)
+  in(c, (pid: bitstring, pkH: pkey, qrsecret: bitstring, commitment: bitstring));
   new skP: skey;
+  new phoneNonce: bitstring;                     (* chosen after the pairing code was read *)
   let pkP = pk(skP) in
-  event PhoneScanned(pid, pkP);
-  out(c, (pid, pkP, mac((pid, pkH, pkP), qrsecret)));
-  in(c, (ackNonce: bitstring, ack: bitstring));
-  let (=tagAck, =pid, =pkP, =ackNonce) = checksign(ack, pkH) in
-  event CodeShown(pid, pkP);
-  out(human, (pid, shortcode(pid, qrsecret, ackNonce)));
+  event PhoneScanned(pid, pkH, pkP);
+  out(c, (pid, pkP, phoneNonce, mac((pid, pkH, pkP, phoneNonce), qrsecret)));
+  in(c, (hostNonce: bitstring, ack: bitstring));
+  let (=tagAck, =pid, =pkP, =phoneNonce, =hostNonce) = checksign(ack, pkH) in
+  if commitment = commit(pid, pkH, hostNonce) then   (* the nonce the pairing code committed to *)
+  event CodeShown(pid, pkH, pkP);
+  out(human, shortcode(hostNonce, phoneNonce));
   in(c, confirmation: bitstring);
   let (=tagConfirm, =pid, =pkP) = checksign(confirmation, pkH) in
-  event PhoneActive(pid, pkP);
+  event PhoneActive(pid, pkH, pkP);
   !PhoneAnswer(pid, pkH, skP).
 
 process
     ( !Host() )
   | ( !Phone() )
-  | ( !in(qr, seen: bitstring); out(c, seen) )   (* an onlooker reads every QR code *)

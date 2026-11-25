@@ -21,7 +21,9 @@ use isudo_proto::api::{
 };
 use isudo_proto::codec::{b64_decode, b64_decode_array, hex_decode_array, hex_encode};
 use isudo_proto::pairing::{decode_pubkey, MAX_NAME_LEN};
-use isudo_proto::{sigs, MAX_REASON_LEN, MAX_REQUEST_LEN, PAIRING_ID_LEN, PUBKEY_LEN, REQUEST_ID_LEN, SIG_LEN};
+use isudo_proto::{
+    sigs, MAX_REASON_LEN, MAX_REQUEST_LEN, PAIRING_ID_LEN, PHONE_NONCE_LEN, PUBKEY_LEN, REQUEST_ID_LEN, SIG_LEN,
+};
 use p256::ecdsa::signature::Verifier as _;
 use p256::ecdsa::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -97,6 +99,11 @@ struct ClaimRecord {
     phone_sign_pub: String,
     phone_kem_pub: String,
     phone_name: String,
+    /// Absent from records written before the phone sent a nonce. Those
+    /// pairings are either already confirmed, where it no longer matters,
+    /// or can never be acknowledged.
+    #[serde(default)]
+    phone_nonce: String,
     claim_mac: String,
     /// SHA-256 of the phone's bearer token, hex. The token itself is not kept.
     token_hash: String,
@@ -281,7 +288,8 @@ impl Relay {
             return Err(Reject::Conflict);
         }
         let keys_ok = decode_pubkey(&body.phone_sign_pub).is_ok() && decode_pubkey(&body.phone_kem_pub).is_ok();
-        let mac_ok = b64_decode_array::<32>(&body.claim_mac).is_ok();
+        let nonce_ok = b64_decode_array::<PHONE_NONCE_LEN>(&body.phone_nonce).is_ok();
+        let mac_ok = nonce_ok && b64_decode_array::<32>(&body.claim_mac).is_ok();
         let token_ok = b64_decode_array::<32>(&body.phone_token).is_ok();
         let device_ok = body.device.as_ref().is_none_or(valid_device);
         if !(keys_ok && mac_ok && token_ok && device_ok && valid_name(&body.phone_name)) {
@@ -291,6 +299,7 @@ impl Relay {
             phone_sign_pub: body.phone_sign_pub.clone(),
             phone_kem_pub: body.phone_kem_pub.clone(),
             phone_name: body.phone_name.clone(),
+            phone_nonce: body.phone_nonce.clone(),
             claim_mac: body.claim_mac.clone(),
             token_hash: hex_encode(&token_hash(&body.phone_token)),
             device: body
@@ -311,6 +320,7 @@ impl Relay {
             phone_sign_pub: claim.phone_sign_pub.clone(),
             phone_kem_pub: claim.phone_kem_pub.clone(),
             phone_name: claim.phone_name.clone(),
+            phone_nonce: claim.phone_nonce.clone(),
             claim_mac: claim.claim_mac.clone(),
         }))
     }
@@ -332,8 +342,10 @@ impl Relay {
         else {
             return Err(Reject::Invalid);
         };
-        let nonce = b64_decode_array(&body.nonce).map_err(|_e| Reject::Invalid)?;
-        if !verified(&record.host_pub, &sigs::pair_ack_msg(&id, &sign_pub, &kem_pub, &nonce), &body.host_sig) {
+        let phone_nonce = b64_decode_array(&claim.phone_nonce).map_err(|_e| Reject::Invalid)?;
+        let host_nonce = b64_decode_array(&body.nonce).map_err(|_e| Reject::Invalid)?;
+        let message = sigs::pair_ack_msg(&id, &sign_pub, &kem_pub, &phone_nonce, &host_nonce);
+        if !verified(&record.host_pub, &message, &body.host_sig) {
             return Err(Reject::Unauthorized);
         }
         record.acked = Some(body.clone());

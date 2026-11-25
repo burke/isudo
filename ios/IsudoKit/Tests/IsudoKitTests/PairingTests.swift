@@ -10,12 +10,18 @@ import Testing
     let store = MemorySecretStore()
     let now: UInt64 = 1_795_000_010
 
+    /// The nonce the pairing code commits to.
+    let hostNonce = Data(repeating: 0x4e, count: Proto.hostNonceLength)
+    let phoneNonce = Data(repeating: 0x70, count: Proto.phoneNonceLength)
+
     var offer: PairingOffer {
-        PairingOffer(
+        let (pairingID, hostPub) = (Data(repeating: 0xa1, count: 16), host.publicKey.x963Representation)
+        return PairingOffer(
             relayURL: "https://relay.example",
-            pairingID: Data(repeating: 0xa1, count: 16),
-            hostPub: host.publicKey.x963Representation,
+            pairingID: pairingID,
+            hostPub: hostPub,
             secret: Data(repeating: 0x3c, count: 32),
+            commitment: Crypto.commitment(pairingID: pairingID, hostPub: hostPub, hostNonce: hostNonce),
             hostName: "burke-mbp"
         )
     }
@@ -31,7 +37,9 @@ import Testing
         let offer = offer
         let signer = try SoftwareSigner.create(account: tag + ".sign", in: store, authenticate: false)
         let (kemPub, token) = try PairingSecrets.create(pairingIDHex: tag, in: store)
-        let pairing = try Pairing(offer: offer, signPub: signer.publicKey, kemPub: kemPub, hardwareBacked: false)
+        let pairing = try Pairing(
+            offer: offer, signPub: signer.publicKey, kemPub: kemPub, phoneNonce: phoneNonce, hardwareBacked: false
+        )
         return Phone(pairing: pairing, signer: signer, kem: try PairingSecrets.kemPrivate(pairingIDHex: tag, from: store), token: token)
     }
 
@@ -39,12 +47,13 @@ import Testing
         try key.signature(for: message).rawRepresentation
     }
 
-    let ackNonce = Data(repeating: 0x4e, count: Proto.ackNonceLength)
-
+    /// An acknowledgement of `pairing`'s answer by `key`, revealing `nonce`
+    /// (by default, the one the pairing code committed to).
     func ack(by key: P256.Signing.PrivateKey, _ pairing: Pairing, nonce: Data? = nil) throws -> API.Ack {
-        let nonce = nonce ?? ackNonce
+        let nonce = nonce ?? hostNonce
         let message = Messages.pairAck(
-            pairingID: pairing.pairingID, phoneSignPub: pairing.signPub, phoneKemPub: pairing.kemPub, nonce: nonce
+            pairingID: pairing.pairingID, phoneSignPub: pairing.signPub, phoneKemPub: pairing.kemPub,
+            phoneNonce: phoneNonce, hostNonce: nonce
         )
         return API.Ack(nonce: Codec.b64Encode(nonce), hostSig: Codec.b64Encode(try sign(key, message)))
     }
@@ -102,7 +111,9 @@ import Testing
         let parties = Crypto.Parties(
             pairingID: offer.pairingID, hostPub: offer.hostPub, phoneSignPub: phone.pairing.signPub, phoneKemPub: phone.pairing.kemPub
         )
-        #expect(try Codec.b64Decode(claim.claimMac) == Crypto.claimMAC(secret: offer.secret, parties: parties, phoneName: "Burke's iPhone"))
+        let mac = Crypto.claimMAC(secret: offer.secret, parties: parties, phoneNonce: phoneNonce, phoneName: "Burke's iPhone")
+        #expect(try Codec.b64Decode(claim.claimMac) == mac)
+        #expect(try Codec.b64Decode(claim.phoneNonce) == phoneNonce)
         #expect(claim.phoneToken == phone.token)
         #expect(try Codec.b64Decode(claim.phoneToken).count == 32)
     }
@@ -118,8 +129,16 @@ import Testing
         var bad = offer
         bad.hostPub = Data([0x04]) + Data(repeating: 0x11, count: 64)
         #expect(throws: PairingError.badOffer) {
-            try Pairing(offer: bad, signPub: Data(count: 65), kemPub: Data(count: 65), hardwareBacked: false)
+            try Pairing(offer: bad, signPub: Data(count: 65), kemPub: Data(count: 65), phoneNonce: phoneNonce, hardwareBacked: false)
         }
+        // A nonce of the wrong size is refused too.
+        #expect(throws: PairingError.badOffer) {
+            try Pairing(
+                offer: offer, signPub: Data(count: 65), kemPub: Data(count: 65), phoneNonce: Data(count: 8), hardwareBacked: false
+            )
+        }
+        #expect(try Pairing.freshNonce().count == Proto.phoneNonceLength)
+        #expect(try Pairing.freshNonce() != Pairing.freshNonce())
     }
 
     @Test func theCodeAppearsOnlyAfterTheHostAcknowledgesTheseKeys() throws {
@@ -167,14 +186,15 @@ import Testing
         let parties = Crypto.Parties(
             pairingID: offer.pairingID, hostPub: offer.hostPub, phoneSignPub: phone.pairing.signPub, phoneKemPub: phone.pairing.kemPub
         )
-        let expected = Crypto.confirmationCode(secret: offer.secret, parties: parties, ackNonce: ackNonce)
+        let expected = Crypto.confirmationCode(secret: offer.secret, parties: parties, hostNonce: hostNonce, phoneNonce: phoneNonce)
         #expect(try phone.pairing.observe(try acknowledged(by: host, phone.pairing)) == .showCode(expected))
         #expect(phone.pairing.code == expected)
-        #expect(phone.pairing.ackNonce == ackNonce)
+        #expect(phone.pairing.hostNonce == hostNonce)
         #expect(!phone.pairing.active, "acknowledged is not yet paired")
-        // The code depends on the nonce: a different one gives a different code.
-        let other = Crypto.confirmationCode(secret: offer.secret, parties: parties, ackNonce: Data(repeating: 0x4f, count: 16))
-        #expect(other != expected)
+        // The code depends on both nonces: changing either gives a different code.
+        let other = Data(repeating: 0x4f, count: 16)
+        #expect(Crypto.confirmationCode(secret: offer.secret, parties: parties, hostNonce: other, phoneNonce: phoneNonce) != expected)
+        #expect(Crypto.confirmationCode(secret: offer.secret, parties: parties, hostNonce: hostNonce, phoneNonce: other) != expected)
         // Once acknowledged, the nonce is fixed: later statuses, with no
         // acknowledgement or a different genuine one, do not change the code.
         #expect(try phone.pairing.observe(API.PairingStatus(state: .acknowledged, ack: nil, hostSig: nil)) == .showCode(expected))
@@ -183,6 +203,55 @@ import Testing
         // And the acknowledged state survives being stored and loaded.
         let restored = try JSONDecoder().decode(Pairing.self, from: JSONEncoder().encode(phone.pairing))
         #expect(restored.code == expected)
+    }
+
+    /// The flaw this guards against: whoever writes a pairing code holds its
+    /// secret and its host key, so can sign any acknowledgement. If they
+    /// could also pick the nonce after seeing the phone's answer, they could
+    /// search for one that makes the phone show any six digits they wanted,
+    /// such as the code a real computer is waiting for after accepting
+    /// *their* key.
+    @Test func whoeverWroteThePairingCodeCannotChooseTheCode() throws {
+        // The attacker writes this pairing code, so `host` is their key.
+        var phone = try begin()
+        let parties = Crypto.Parties(
+            pairingID: offer.pairingID, hostPub: offer.hostPub, phoneSignPub: phone.pairing.signPub, phoneKemPub: phone.pairing.kemPub
+        )
+        let secret = offer.secret
+        // They see the phone's answer, then search for a nonce that gives a
+        // code they want. (Any code ending 00 will do here: a hundred tries
+        // on average, where the real attack needs a million.)
+        var steering = Data(count: Proto.hostNonceLength)
+        var tries: UInt32 = 0
+        while !Crypto.confirmationCode(secret: secret, parties: parties, hostNonce: steering, phoneNonce: phoneNonce).hasSuffix("00") {
+            tries += 1
+            steering = withUnsafeBytes(of: tries.bigEndian) { Data($0) } + Data(count: Proto.hostNonceLength - 4)
+        }
+        // Their acknowledgement is properly signed, over this phone's own
+        // keys and nonce. But the nonce is not the one the pairing code
+        // committed to.
+        let steered = API.PairingStatus(state: .acknowledged, ack: try ack(by: host, phone.pairing, nonce: steering), hostSig: nil)
+        #expect(throws: PairingError.codeWasSteered) { try phone.pairing.observe(steered) }
+        #expect(phone.pairing.code == nil, "the phone shows nothing to type")
+        #expect(!phone.pairing.acknowledged)
+
+        // The only acknowledgement the phone accepts reveals the committed
+        // nonce, which was fixed before the phone chose its own.
+        let expected = Crypto.confirmationCode(secret: secret, parties: parties, hostNonce: hostNonce, phoneNonce: phoneNonce)
+        #expect(try phone.pairing.observe(try acknowledged(by: host, phone.pairing)) == .showCode(expected))
+    }
+
+    /// A pairing left unfinished by a version of the app from before pairing
+    /// codes carried a commitment cannot be finished.
+    @Test func anUnfinishedPairingFromBeforeCommitmentsIsRefused() throws {
+        let phone = try begin()
+        var stored = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(phone.pairing)) as? [String: Any])
+        stored["commitment"] = nil
+        stored["phoneNonce"] = nil
+        var old = try JSONDecoder().decode(Pairing.self, from: JSONSerialization.data(withJSONObject: stored))
+        #expect(old.claim(phoneName: "x", token: phone.token, device: nil) == nil)
+        #expect(throws: PairingError.badOffer) { try old.observe(try acknowledged(by: host, phone.pairing)) }
+        #expect(old.code == nil)
     }
 
     @Test func onlyTheHostsConfirmationActivatesAPairing() throws {
@@ -211,12 +280,14 @@ import Testing
         #expect(phone.pairing.active)
         // The single-use secret and nonce are gone once they have done their job.
         #expect(phone.pairing.secret == nil)
-        #expect(phone.pairing.ackNonce == nil)
+        #expect(phone.pairing.hostNonce == nil && phone.pairing.phoneNonce == nil && phone.pairing.commitment == nil)
         #expect(phone.pairing.code == nil)
         #expect(phone.pairing.acknowledged)
         #expect(phone.pairing.claim(phoneName: "x", token: "y", device: nil) == nil)
         let stored = String(decoding: try JSONEncoder().encode(phone.pairing), as: UTF8.self)
-        #expect(!stored.contains("ackNonce") && !stored.contains("secret"), "nothing single-use is kept on disk")
+        #expect(
+            !["Nonce", "secret", "commitment"].contains { stored.contains($0) }, "nothing single-use is kept on disk"
+        )
         // An active pairing stays active whatever the relay says next.
         #expect(try phone.pairing.observe(API.PairingStatus(state: .pending, ack: nil, hostSig: nil)) == .active)
     }

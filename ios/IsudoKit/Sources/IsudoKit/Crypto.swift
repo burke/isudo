@@ -80,20 +80,31 @@ public enum Crypto {
         var transcript: Data { pairingID + hostPub + phoneSignPub + phoneKemPub }
     }
 
-    /// The phone's proof that it read the QR code: HMAC-SHA256 under the
-    /// pairing secret over every key in the pairing and the phone's name.
-    public static func claimMAC(secret: Data, parties: Parties, phoneName: String) -> Data {
-        let message = Messages.pairClaim + parties.transcript + Data(phoneName.utf8)
+    /// The commitment a pairing code carries to the host's nonce.
+    ///
+    /// It fixes the nonce without revealing it. Covering the pairing id and
+    /// the host key ties it to one pairing code.
+    public static func commitment(pairingID: Data, hostPub: Data, hostNonce: Data) -> Data {
+        Data(SHA256.hash(data: Messages.pairCommit + pairingID + hostPub + hostNonce))
+    }
+
+    /// The phone's proof that it read the pairing code: HMAC-SHA256 under
+    /// the pairing secret over every key in the pairing, the phone's nonce
+    /// and the phone's name.
+    public static func claimMAC(secret: Data, parties: Parties, phoneNonce: Data, phoneName: String) -> Data {
+        let message = Messages.pairClaim + parties.transcript + phoneNonce + Data(phoneName.utf8)
         return Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: secret)))
     }
 
     /// The six-digit code shown on the phone and typed into the host.
     ///
-    /// `ackNonce` is the random value in the host's acknowledgement. Because
-    /// the host picks it only after receiving the phone's keys, the code
-    /// cannot be steered by choosing keys.
-    public static func confirmationCode(secret: Data, parties: Parties, ackNonce: Data) -> String {
-        let message = Messages.pairCode + parties.transcript + ackNonce
+    /// It depends on both nonces, and neither side can choose its nonce
+    /// knowing the other's: the host's is fixed by the commitment in the
+    /// pairing code before the phone picks one, and is revealed only after
+    /// the phone's has arrived. So nobody can steer the code, whichever
+    /// side they play.
+    public static func confirmationCode(secret: Data, parties: Parties, hostNonce: Data, phoneNonce: Data) -> String {
+        let message = Messages.pairCode + parties.transcript + hostNonce + phoneNonce
         let tag = Data(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: secret)))
         let number = tag.prefix(8).reduce(UInt64(0)) { $0 << 8 | UInt64($1) } % 1_000_000
         let digits = String(number)

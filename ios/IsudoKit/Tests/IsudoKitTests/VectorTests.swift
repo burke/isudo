@@ -144,7 +144,8 @@ struct Vectors {
             pairingID: request.pairingID,
             phoneSignPub: try vectors.b64("pairing", "phone_sign_pub_b64"),
             phoneKemPub: try vectors.b64("pairing", "phone_kem_pub_b64"),
-            nonce: try vectors.b64("pairing", "ack_nonce_b64")
+            phoneNonce: try vectors.b64("pairing", "phone_nonce_b64"),
+            hostNonce: try vectors.b64("pairing", "host_nonce_b64")
         )
         #expect(ack == (try vectors.hex("messages", "pair_ack_hex")))
         #expect(ack != confirm)
@@ -189,6 +190,7 @@ struct Vectors {
         #expect(offer.pairingID == (try vectors.hex("pairing", "pairing_id_hex")))
         #expect(offer.hostPub == (try vectors.b64("pairing", "host_pub_b64")))
         #expect(offer.secret == (try vectors.b64("pairing", "secret_b64")))
+        #expect(offer.commitment == (try vectors.b64("pairing", "commitment_b64")))
         #expect(offer.hostName == (try vectors.string("pairing", "host_name")))
         #expect(offer.link == link)
         #expect(try PairingOffer(link: "  " + link + "\n") == offer)
@@ -199,6 +201,9 @@ struct Vectors {
         #expect(throws: PairingOffer.ParseError.self) { try PairingOffer(link: link + "%") }
         #expect(throws: PairingOffer.ParseError.self) { try PairingOffer(link: link + "%zz") }
         #expect(throws: PairingOffer.ParseError.self) { try PairingOffer(link: link.replacingOccurrences(of: "&s=", with: "&t=")) }
+        // A link from before the commitment existed is refused, and says why.
+        let old = link.replacingOccurrences(of: "v=2", with: "v=1").split(separator: "&").filter { !$0.hasPrefix("c=") }.joined(separator: "&")
+        #expect(throws: PairingOffer.ParseError(reason: PairingOffer.outdated)) { try PairingOffer(link: old) }
 
         let parties = Crypto.Parties(
             pairingID: offer.pairingID,
@@ -207,11 +212,13 @@ struct Vectors {
             phoneKemPub: try vectors.b64("pairing", "phone_kem_pub_b64")
         )
         let phoneName = try vectors.string("pairing", "phone_name")
-        #expect(Crypto.claimMAC(secret: offer.secret, parties: parties, phoneName: phoneName)
+        let hostNonce = try vectors.b64("pairing", "host_nonce_b64")
+        let phoneNonce = try vectors.b64("pairing", "phone_nonce_b64")
+        #expect(hostNonce.count == Proto.hostNonceLength && phoneNonce.count == Proto.phoneNonceLength)
+        #expect(Crypto.commitment(pairingID: offer.pairingID, hostPub: offer.hostPub, hostNonce: hostNonce) == offer.commitment)
+        #expect(Crypto.claimMAC(secret: offer.secret, parties: parties, phoneNonce: phoneNonce, phoneName: phoneName)
             == (try vectors.b64("pairing", "claim_mac_b64")))
-        let nonce = try vectors.b64("pairing", "ack_nonce_b64")
-        #expect(nonce.count == Proto.ackNonceLength)
-        #expect(Crypto.confirmationCode(secret: offer.secret, parties: parties, ackNonce: nonce)
+        #expect(Crypto.confirmationCode(secret: offer.secret, parties: parties, hostNonce: hostNonce, phoneNonce: phoneNonce)
             == (try vectors.string("pairing", "confirmation_code")))
     }
 
@@ -280,11 +287,22 @@ struct Vectors {
             offer: offer,
             signPub: try vectors.b64("pairing", "phone_sign_pub_b64"),
             kemPub: try vectors.b64("pairing", "phone_kem_pub_b64"),
+            phoneNonce: try vectors.b64("pairing", "phone_nonce_b64"),
             hardwareBacked: false
         )
         #expect(pairing.code == nil)
+        // The reference host's genuine signature over a nonce the pairing
+        // code did not commit to: an attempt to choose the code.
+        let steered = API.Ack(
+            nonce: try vectors.string("pairing", "uncommitted_nonce_b64"),
+            hostSig: try vectors.string("signatures", "pair_ack_uncommitted_sig_b64")
+        )
+        #expect(throws: PairingError.codeWasSteered) {
+            try pairing.observe(API.PairingStatus(state: .acknowledged, ack: steered, hostSig: nil))
+        }
+        #expect(pairing.code == nil)
         let ack = API.Ack(
-            nonce: try vectors.string("pairing", "ack_nonce_b64"),
+            nonce: try vectors.string("pairing", "host_nonce_b64"),
             hostSig: try vectors.string("signatures", "pair_ack_sig_b64")
         )
         let confirm = try vectors.string("signatures", "pair_confirm_sig_b64")

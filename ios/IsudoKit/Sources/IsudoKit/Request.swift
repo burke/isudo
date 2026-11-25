@@ -8,7 +8,12 @@ public enum Proto {
     public static let requestIDLength = 16
     public static let nonceLength = 32
     /// Length of the nonce in the host's pairing acknowledgement.
-    public static let ackNonceLength = 16
+    /// The host's pairing nonce: committed to in the pairing code, revealed
+    /// in the acknowledgement.
+    public static let hostNonceLength = 16
+    /// The phone's pairing nonce, sent with its answer.
+    public static let phoneNonceLength = 16
+    public static let commitmentLength = 32
     public static let secretLength = 32
     public static let maxRequestLength = 64 * 1024
     public static let maxReasonLength = 512

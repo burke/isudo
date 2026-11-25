@@ -19,21 +19,30 @@ fn sign_raw(key: &SigningKey, message: &[u8]) -> [u8; SIG_LEN] {
     signature.to_bytes().into()
 }
 
+/// The nonce the pairing code commits to.
+const HOST_NONCE: [u8; 16] = [0x4e; 16];
+
 fn offer() -> Offer {
+    let host_pub = public_of(&host_key());
     Offer {
         relay_url: "https://relay.example".into(),
         pairing_id: [0xa1; PAIRING_ID_LEN],
-        host_pub: public_of(&host_key()),
+        host_pub,
         secret: [0x3c; 32],
+        commitment: pairing::commitment(&[0xa1; PAIRING_ID_LEN], &host_pub, &HOST_NONCE),
         host_name: "burke-mbp".into(),
     }
 }
 
-const ACK_NONCE: [u8; 16] = [0x4e; 16];
+/// An acknowledgement of `pairing`'s answer revealing `nonce`, signed by `key`.
+fn ack_with(key: &SigningKey, pairing: &Pairing, nonce: &[u8; 16]) -> Ack {
+    let message =
+        sigs::pair_ack_msg(&offer().pairing_id, pairing.sign_pub(), &pairing.kem_pub, &pairing.phone_nonce, nonce);
+    Ack { nonce: b64_encode(nonce), host_sig: b64_encode(&sign_raw(key, &message)) }
+}
 
 fn ack_by(key: &SigningKey, pairing: &Pairing) -> Ack {
-    let message = sigs::pair_ack_msg(&offer().pairing_id, pairing.sign_pub(), &pairing.kem_pub, &ACK_NONCE);
-    Ack { nonce: b64_encode(&ACK_NONCE), host_sig: b64_encode(&sign_raw(key, &message)) }
+    ack_with(key, pairing, &HOST_NONCE)
 }
 
 fn acknowledged_by(key: &SigningKey, pairing: &Pairing) -> PairingStatus {
@@ -98,8 +107,11 @@ fn the_claim_proves_knowledge_of_the_secret() {
     let pairing = Pairing::begin(&offer(), &SEED).unwrap();
     let claim = pairing.claim("Burke's iPhone", None);
     let mac = b64_decode(&claim.claim_mac).unwrap();
-    assert!(pairing::verify_claim_mac(&offer().secret, &pairing.parties(), b"Burke's iPhone", &mac));
-    assert!(!pairing::verify_claim_mac(&[0; 32], &pairing.parties(), b"Burke's iPhone", &mac));
+    let nonce = b64_decode_array(&claim.phone_nonce).unwrap();
+    assert_eq!(nonce, pairing.phone_nonce);
+    assert!(pairing::verify_claim_mac(&offer().secret, &pairing.parties(), &nonce, b"Burke's iPhone", &mac));
+    assert!(!pairing::verify_claim_mac(&[0; 32], &pairing.parties(), &nonce, b"Burke's iPhone", &mac));
+    assert!(!pairing::verify_claim_mac(&offer().secret, &pairing.parties(), &[0; 16], b"Burke's iPhone", &mac));
 }
 
 #[test]
@@ -109,6 +121,7 @@ fn each_pairing_has_its_own_keys() {
     assert_ne!(first.sign_pub(), second.sign_pub());
     assert_ne!(first.kem_pub, second.kem_pub);
     assert_ne!(first.token(), second.token());
+    assert_ne!(first.phone_nonce, second.phone_nonce);
     // And the same seed gives the same pairing, which is how it is stored.
     let again = Pairing::resume(&offer(), &SEED, true).unwrap();
     assert_eq!(again.sign_pub(), first.sign_pub());
@@ -139,7 +152,7 @@ fn the_code_appears_only_after_the_host_acknowledges_these_keys() {
     let confirm = sigs::pair_confirm_msg(&offer().pairing_id, pairing.sign_pub(), &pairing.kem_pub);
     let crossed = PairingStatus {
         state: PairingState::Acknowledged,
-        ack: Some(Ack { nonce: b64_encode(&ACK_NONCE), host_sig: b64_encode(&sign_raw(&host_key(), &confirm)) }),
+        ack: Some(Ack { nonce: b64_encode(&HOST_NONCE), host_sig: b64_encode(&sign_raw(&host_key(), &confirm)) }),
         host_sig: None,
     };
     assert_eq!(pairing.observe(&crossed), Err(PairingError::AnotherPhoneWasAccepted));
@@ -151,13 +164,80 @@ fn the_code_appears_only_after_the_host_acknowledges_these_keys() {
         host_sig: None,
     };
     assert_eq!(pairing.observe(&renonced), Err(PairingError::AnotherPhoneWasAccepted));
+    // ...or an acknowledgement of this phone's keys that does not cover the
+    // nonce this phone sent: one made for an answer this phone did not give.
+    let stale = sigs::pair_ack_msg(&offer().pairing_id, pairing.sign_pub(), &pairing.kem_pub, &[0; 16], &HOST_NONCE);
+    let replayed = PairingStatus {
+        state: PairingState::Acknowledged,
+        ack: Some(Ack { nonce: b64_encode(&HOST_NONCE), host_sig: b64_encode(&sign_raw(&host_key(), &stale)) }),
+        host_sig: None,
+    };
+    assert_eq!(pairing.observe(&replayed), Err(PairingError::AnotherPhoneWasAccepted));
     assert_eq!(pairing.code(), None, "none of that released a code");
 
     // The real thing.
-    let expected = pairing::confirmation_code(&offer().secret, &pairing.parties(), &ACK_NONCE);
+    let expected = pairing::confirmation_code(&offer().secret, &pairing.parties(), &HOST_NONCE, &pairing.phone_nonce);
     assert_eq!(pairing.observe(&acknowledged_by(&host_key(), &pairing)), Ok(Progress::ShowCode(expected.clone())));
     assert_eq!(pairing.code(), Some(expected));
     assert!(!pairing.is_active(), "acknowledged is not yet paired");
+}
+
+/// The flaw this guards against: whoever writes a pairing code holds its
+/// secret and its host key, so can sign any acknowledgement. If they could
+/// also pick the nonce after seeing the phone's answer, they could search
+/// for one that makes the phone show any six digits they wanted, such as
+/// the code a real computer is waiting for after accepting *their* key.
+#[test]
+fn whoever_wrote_the_pairing_code_cannot_choose_the_code() {
+    // The attacker writes this pairing code, so `host_key()` is theirs.
+    let mut pairing = Pairing::begin(&offer(), &SEED).unwrap();
+    let wanted = "271828";
+
+    // They see the phone's answer, then search for a nonce giving the code
+    // they want. Six digits: it does not take long.
+    let secret = offer().secret;
+    let parties = pairing.parties();
+    let steering = (0..100_000_000_u64)
+        .map(|n| {
+            let mut nonce = [0_u8; 16];
+            nonce[..8].copy_from_slice(&n.to_be_bytes());
+            nonce
+        })
+        .find(|nonce| pairing::confirmation_code(&secret, &parties, nonce, &pairing.phone_nonce) == wanted)
+        .unwrap();
+
+    // Their acknowledgement is properly signed, over this phone's own keys
+    // and nonce. But the nonce is not the one the pairing code committed to.
+    let steered = PairingStatus {
+        state: PairingState::Acknowledged,
+        ack: Some(ack_with(&host_key(), &pairing, &steering)),
+        host_sig: None,
+    };
+    assert_eq!(pairing.observe(&steered), Err(PairingError::CodeWasSteered));
+    assert_eq!(pairing.code(), None, "the phone shows nothing to type");
+
+    // The only acknowledgement the phone accepts reveals the committed
+    // nonce, and that was fixed before the phone chose its own. So the code
+    // is whatever it is: here, not the one wanted.
+    let Ok(Progress::ShowCode(shown)) = pairing.observe(&acknowledged_by(&host_key(), &pairing)) else {
+        panic!("the honest acknowledgement was refused");
+    };
+    assert_ne!(shown, wanted);
+}
+
+/// The phone's nonce is its own contribution: with the pairing code and the
+/// phone's keys all held fixed, a different nonce gives a different code.
+#[test]
+fn the_phones_nonce_changes_the_code() {
+    let mut codes = BTreeSet::new();
+    for seed in 0..40_u8 {
+        let mut pairing = Pairing::begin(&offer(), &[seed; 32]).unwrap();
+        let Ok(Progress::ShowCode(code)) = pairing.observe(&acknowledged_by(&host_key(), &pairing)) else {
+            panic!("no code for seed {seed}");
+        };
+        let _ = codes.insert(code);
+    }
+    assert!(codes.len() >= 39, "codes repeat: {}", codes.len());
 }
 
 #[test]

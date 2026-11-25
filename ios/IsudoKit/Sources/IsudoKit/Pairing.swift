@@ -27,6 +27,11 @@ public enum PairingError: Error, Equatable, Sendable {
     /// Someone else answered the pairing, or the relay is lying. The person
     /// must not continue on the host.
     case anotherPhoneWasAccepted
+    /// The acknowledgement reveals a nonce that the pairing code did not
+    /// commit to. Whoever wrote the pairing code is trying to choose the
+    /// code this phone shows, which an honest computer never does. The
+    /// person must not type anything into any computer.
+    case codeWasSteered
     /// The relay says the pairing is active, but the host's signature over
     /// this phone's keys is missing or wrong.
     case notConfirmedByHost
@@ -95,17 +100,22 @@ public struct Pairing: Equatable, Sendable, Codable, Identifiable {
     public let hostPub: Data
     public let hostName: String
     public let relayURL: String
-    /// The single-use secret from the QR code. Dropped once the pairing is
-    /// active, when nothing needs it any more.
+    /// The single-use secret from the pairing code. Dropped once the pairing
+    /// is active, when nothing needs it any more.
     public private(set) var secret: Data?
+    /// The pairing code's commitment to the host's nonce, and the nonce this
+    /// phone chose after reading the pairing code. Both are dropped with the
+    /// secret.
+    public private(set) var commitment: Data?
+    public private(set) var phoneNonce: Data?
     public let signPub: Data
     public let kemPub: Data
     /// Whether the signing key is in the Secure Enclave behind biometry.
     public let hardwareBacked: Bool
-    /// The nonce from the host's acknowledgement of this phone's own keys,
-    /// once that acknowledgement has been verified. Like the secret, it is
-    /// dropped when the pairing becomes active.
-    public private(set) var ackNonce: Data?
+    /// The host's nonce, once its acknowledgement of this phone's own answer
+    /// has been verified. Like the secret, it is dropped when the pairing
+    /// becomes active.
+    public private(set) var hostNonce: Data?
     public private(set) var active: Bool
     private var seen: Set<Data>
 
@@ -113,7 +123,8 @@ public struct Pairing: Equatable, Sendable, Codable, Identifiable {
     public var idHex: String { Codec.hexEncode(pairingID) }
 
     enum CodingKeys: String, CodingKey {
-        case pairingID, hostPub, hostName, relayURL, secret, signPub, kemPub, hardwareBacked, ackNonce, active, seen
+        case pairingID, hostPub, hostName, relayURL, secret, commitment, phoneNonce, signPub, kemPub, hardwareBacked
+        case hostNonce, active, seen
     }
 
     public init(from decoder: any Decoder) throws {
@@ -123,32 +134,55 @@ public struct Pairing: Equatable, Sendable, Codable, Identifiable {
         hostName = try values.decode(String.self, forKey: .hostName)
         relayURL = try values.decode(String.self, forKey: .relayURL)
         secret = try values.decodeIfPresent(Data.self, forKey: .secret)
+        // Absent for an active pairing. Also absent for one left unfinished
+        // by a version of the app from before pairing codes carried a
+        // commitment; that one can never finish, and `observe` says so.
+        commitment = try values.decodeIfPresent(Data.self, forKey: .commitment)
+        phoneNonce = try values.decodeIfPresent(Data.self, forKey: .phoneNonce)
         signPub = try values.decode(Data.self, forKey: .signPub)
         kemPub = try values.decode(Data.self, forKey: .kemPub)
         hardwareBacked = try values.decode(Bool.self, forKey: .hardwareBacked)
         active = try values.decode(Bool.self, forKey: .active)
-        // Absent for an active pairing, and for one stored before
-        // acknowledgements carried a nonce, which then waits for a fresh one.
-        ackNonce = try values.decodeIfPresent(Data.self, forKey: .ackNonce)
+        hostNonce = try values.decodeIfPresent(Data.self, forKey: .hostNonce)
         seen = try values.decode(Set<Data>.self, forKey: .seen)
     }
 
     /// Starts a pairing from a scanned offer with this pairing's own freshly
     /// generated public keys. Each pairing gets its own keys, so nothing
     /// links a phone's pairings to each other.
-    public init(offer: PairingOffer, signPub: Data, kemPub: Data, hardwareBacked: Bool) throws(PairingError) {
-        guard Crypto.isValidPublicKey(offer.hostPub) else { throw .badOffer }
+    ///
+    /// `phoneNonce` must be freshly random, from `Pairing.freshNonce()`. It
+    /// has to be chosen now, after the offer was read: the offer's author
+    /// has already fixed their own nonce, so this one is what stops them
+    /// choosing the code.
+    public init(
+        offer: PairingOffer, signPub: Data, kemPub: Data, phoneNonce: Data, hardwareBacked: Bool
+    ) throws(PairingError) {
+        guard Crypto.isValidPublicKey(offer.hostPub), offer.commitment.count == Proto.commitmentLength,
+              phoneNonce.count == Proto.phoneNonceLength
+        else { throw .badOffer }
         pairingID = offer.pairingID
         hostPub = offer.hostPub
         hostName = offer.hostName
         relayURL = offer.relayURL
         secret = offer.secret
+        commitment = offer.commitment
+        self.phoneNonce = phoneNonce
         self.signPub = signPub
         self.kemPub = kemPub
         self.hardwareBacked = hardwareBacked
-        ackNonce = nil
+        hostNonce = nil
         active = false
         seen = []
+    }
+
+    /// A random nonce for a new pairing.
+    public static func freshNonce() throws -> Data {
+        var bytes = [UInt8](repeating: 0, count: Proto.phoneNonceLength)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw SignerError.keyUnusable
+        }
+        return Data(bytes)
     }
 
     private var parties: Crypto.Parties {
@@ -157,34 +191,37 @@ public struct Pairing: Equatable, Sendable, Codable, Identifiable {
 
     /// What to send the relay to answer the pairing, or nil once active.
     public func claim(phoneName: String, token: String, device: API.DeviceUpdate?) -> API.Claim? {
-        guard let secret else { return nil }
+        guard let secret, let phoneNonce else { return nil }
+        let mac = Crypto.claimMAC(secret: secret, parties: parties, phoneNonce: phoneNonce, phoneName: phoneName)
         return API.Claim(
             phoneSignPub: Codec.b64Encode(signPub),
             phoneKemPub: Codec.b64Encode(kemPub),
             phoneName: phoneName,
-            claimMac: Codec.b64Encode(Crypto.claimMAC(secret: secret, parties: parties, phoneName: phoneName)),
+            phoneNonce: Codec.b64Encode(phoneNonce),
+            claimMac: Codec.b64Encode(mac),
             phoneToken: token,
             device: device
         )
     }
 
     /// Whether the host has acknowledged this phone's own keys.
-    public var acknowledged: Bool { active || ackNonce != nil }
+    public var acknowledged: Bool { active || hostNonce != nil }
 
     /// The six digits to show the person, who types them into the host.
     ///
     /// There is no code until the host has acknowledged, with its signature,
-    /// that the keys it accepted are this phone's. That ordering is what the
-    /// code's meaning rests on: a phone whose keys were swapped in transit
-    /// never gets that signature and so never has a code to show. The code
-    /// also depends on the host's nonce, chosen after the keys were fixed,
-    /// so it cannot be matched by trying keys.
+    /// that the answer it accepted is this phone's. That ordering is what
+    /// the code's meaning rests on: a phone whose keys were swapped in
+    /// transit never gets that signature and so never has a code to show.
+    /// The code depends on both nonces: the host's, which the pairing code
+    /// committed to before this phone chose its own, and this phone's. So
+    /// neither side could have chosen it.
     ///
-    /// Also nil once the pairing is active, when the secret and nonce have
+    /// Also nil once the pairing is active, when the secret and nonces have
     /// been dropped.
     public var code: String? {
-        guard let secret, let ackNonce else { return nil }
-        return Crypto.confirmationCode(secret: secret, parties: parties, ackNonce: ackNonce)
+        guard let secret, let hostNonce, let phoneNonce else { return nil }
+        return Crypto.confirmationCode(secret: secret, parties: parties, hostNonce: hostNonce, phoneNonce: phoneNonce)
     }
 
     private func hostSigned(_ message: Data, _ encoded: String?) -> Bool {
@@ -198,35 +235,49 @@ public struct Pairing: Equatable, Sendable, Codable, Identifiable {
     /// host's signatures.
     ///
     /// - The code is released only on the host's acknowledgement of this
-    ///   phone's own keys, and is derived from the nonce that the
-    ///   acknowledgement signs.
+    ///   phone's own keys and nonce, revealing the nonce that the pairing
+    ///   code committed to.
     /// - The pairing becomes active only on the host's confirmation of them.
     ///
     /// Throws if the relay reports progress that the host's signatures do
-    /// not back up. `anotherPhoneWasAccepted` in particular means the person
-    /// must not continue on the host.
+    /// not back up. `anotherPhoneWasAccepted` and `codeWasSteered` in
+    /// particular mean the person must not continue on the host.
     public mutating func observe(_ status: API.PairingStatus) throws(PairingError) -> PairingProgress {
         if active { return .active }
-        if ackNonce == nil {
+        if hostNonce == nil {
+            // An unfinished pairing from before pairing codes carried a
+            // commitment cannot be finished safely. Start again.
+            guard let commitment, let phoneNonce else { throw .badOffer }
             let claimsProgress = status.state == .acknowledged || status.state == .active
             guard let ack = status.ack else {
                 if claimsProgress { throw .anotherPhoneWasAccepted }
                 return .waiting
             }
-            guard let nonce = try? Codec.b64Decode(ack.nonce, count: Proto.ackNonceLength) else {
+            guard let nonce = try? Codec.b64Decode(ack.nonce, count: Proto.hostNonceLength) else {
                 throw .anotherPhoneWasAccepted
             }
-            let message = Messages.pairAck(pairingID: pairingID, phoneSignPub: signPub, phoneKemPub: kemPub, nonce: nonce)
+            let message = Messages.pairAck(
+                pairingID: pairingID, phoneSignPub: signPub, phoneKemPub: kemPub, phoneNonce: phoneNonce, hostNonce: nonce
+            )
             guard hostSigned(message, ack.hostSig) else { throw .anotherPhoneWasAccepted }
-            ackNonce = nonce
+            // The holder of the host key signed for this phone's answer. The
+            // nonce must also be the one fixed before this phone answered;
+            // otherwise it could have been picked, after seeing this phone's
+            // nonce, to make the code come out as wanted.
+            guard Crypto.commitment(pairingID: pairingID, hostPub: hostPub, hostNonce: nonce) == commitment else {
+                throw .codeWasSteered
+            }
+            hostNonce = nonce
         }
         if status.state == .active {
             let message = Messages.pairConfirm(pairingID: pairingID, phoneSignPub: signPub, phoneKemPub: kemPub)
             guard hostSigned(message, status.hostSig) else { throw .notConfirmedByHost }
             active = true
-            // The single-use secret and nonce have done their job.
+            // The single-use secret and nonces have done their job.
             secret = nil
-            ackNonce = nil
+            commitment = nil
+            phoneNonce = nil
+            hostNonce = nil
             return .active
         }
         guard let code else { throw .anotherPhoneWasAccepted }

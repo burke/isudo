@@ -1,18 +1,23 @@
 import Foundation
 
-/// Everything in the pairing QR code. Mirrors `isudo_proto::pairing::Offer`.
+/// Everything in the pairing code (a QR code or link). Mirrors
+/// `isudo_proto::pairing::Offer`.
 public struct PairingOffer: Equatable, Sendable, Codable {
     public var relayURL: String
     public var pairingID: Data
     public var hostPub: Data
     public var secret: Data
+    /// The computer's commitment to the nonce it will reveal when it accepts
+    /// an answer. See `Crypto.commitment`.
+    public var commitment: Data
     public var hostName: String
 
-    public init(relayURL: String, pairingID: Data, hostPub: Data, secret: Data, hostName: String) {
+    public init(relayURL: String, pairingID: Data, hostPub: Data, secret: Data, commitment: Data, hostName: String) {
         self.relayURL = relayURL
         self.pairingID = pairingID
         self.hostPub = hostPub
         self.secret = secret
+        self.commitment = commitment
         self.hostName = hostName
     }
 
@@ -21,8 +26,10 @@ public struct PairingOffer: Equatable, Sendable, Codable {
     }
 
     static let prefix = "isudo://pair?"
+    /// The reason given for a link in the previous format.
+    public static let outdated = "pairing link is from an older isudo; update isudo on the computer"
 
-    /// Parses `isudo://pair?v=1&r=<relay>&p=<id>&k=<host key>&s=<secret>&n=<name>`.
+    /// Parses `isudo://pair?v=2&r=<relay>&p=<id>&k=<host key>&s=<secret>&c=<commitment>&n=<name>`.
     /// Exactly these fields, each once, with values of the right size.
     public init(link: String) throws(ParseError) {
         let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -31,7 +38,7 @@ public struct PairingOffer: Equatable, Sendable, Codable {
         for pair in trimmed.dropFirst(Self.prefix.count).split(separator: "&", omittingEmptySubsequences: false) {
             guard let equals = pair.firstIndex(of: "=") else { throw ParseError(reason: "malformed pairing link") }
             let key = String(pair[..<equals])
-            guard ["v", "r", "p", "k", "s", "n"].contains(key) else {
+            guard ["v", "r", "p", "k", "s", "c", "n"].contains(key) else {
                 throw ParseError(reason: "unknown field in pairing link")
             }
             guard fields.updateValue(String(pair[pair.index(after: equals)...]), forKey: key) == nil else {
@@ -42,7 +49,13 @@ public struct PairingOffer: Equatable, Sendable, Codable {
             guard let value = fields[key] else { throw ParseError(reason: "pairing link is missing a field") }
             return value
         }
-        guard try field("v") == "1" else { throw ParseError(reason: "unsupported pairing link version") }
+        switch try field("v") {
+        case "2": break
+        // Version 1 had no commitment, which let whoever wrote the link
+        // choose the code this phone would show.
+        case "1": throw ParseError(reason: Self.outdated)
+        default: throw ParseError(reason: "unsupported pairing link version")
+        }
         func binary(_ key: String, count: Int) throws(ParseError) -> Data {
             let text = try field(key)
             do { return try Codec.b64Decode(text, count: count) } catch { throw ParseError(reason: error.reason) }
@@ -52,6 +65,7 @@ public struct PairingOffer: Equatable, Sendable, Codable {
         hostPub = try binary("k", count: Proto.pubkeyLength)
         guard hostPub.first == 0x04 else { throw ParseError(reason: "public key is not in uncompressed form") }
         secret = try binary("s", count: Proto.secretLength)
+        commitment = try binary("c", count: Proto.commitmentLength)
         hostName = try Self.percentDecode(try field("n"))
         guard hostName.utf8.count <= Proto.maxNameLength else { throw ParseError(reason: "host name is too long") }
     }
@@ -91,9 +105,9 @@ public struct PairingOffer: Equatable, Sendable, Codable {
 
     /// The link form, as `isudo-admin pair` prints it.
     public var link: String {
-        Self.prefix + "v=1&r=" + Self.percentEncode(relayURL) + "&p=" + Codec.b64Encode(pairingID)
+        Self.prefix + "v=2&r=" + Self.percentEncode(relayURL) + "&p=" + Codec.b64Encode(pairingID)
             + "&k=" + Codec.b64Encode(hostPub) + "&s=" + Codec.b64Encode(secret)
-            + "&n=" + Self.percentEncode(hostName)
+            + "&c=" + Codec.b64Encode(commitment) + "&n=" + Self.percentEncode(hostName)
     }
 }
 

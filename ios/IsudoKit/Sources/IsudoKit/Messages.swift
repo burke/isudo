@@ -18,6 +18,7 @@ public enum Messages {
     static let envelope = context("isudo/v1/envelope")
     static let pairClaim = context("isudo/v1/pair-claim")
     static let pairCode = context("isudo/v1/pair-code")
+    static let pairCommit = context("isudo/v1/pair-commit")
 
     /// SHA-256 of the encoded request. The phone's approval covers this.
     public static func requestDigest(_ request: Data) -> Data {
@@ -46,14 +47,15 @@ public enum Messages {
     }
 
     /// Signed by the host key as soon as it accepts a phone's answer, before
-    /// anyone types a code. It names the phone keys the host accepted, and
-    /// carries a random nonce the host chose only after it had those keys.
-    /// The phone shows its code only once it holds this signature over its
-    /// own keys, and derives the code from the nonce, so the code can be
-    /// neither obtained by a phone whose keys were swapped on the way nor
-    /// searched for by choosing keys.
-    public static func pairAck(pairingID: Data, phoneSignPub: Data, phoneKemPub: Data, nonce: Data) -> Data {
-        pairAck + pairingID + phoneSignPub + phoneKemPub + nonce
+    /// anyone types a code. It names the phone keys and the phone nonce the
+    /// host accepted, and reveals the host's own nonce, which the pairing
+    /// code committed to. The phone shows its code only once it holds this
+    /// signature over its own answer, so a phone whose keys were swapped on
+    /// the way never has a code to show.
+    public static func pairAck(
+        pairingID: Data, phoneSignPub: Data, phoneKemPub: Data, phoneNonce: Data, hostNonce: Data
+    ) -> Data {
+        pairAck + pairingID + phoneSignPub + phoneKemPub + phoneNonce + hostNonce
     }
 
     /// Signed by the host key once the operator has confirmed the code.

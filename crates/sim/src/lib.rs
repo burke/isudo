@@ -27,6 +27,8 @@
 #![forbid(unsafe_code)]
 
 #[cfg(test)]
+mod differential;
+#[cfg(test)]
 mod pairing_tests;
 mod world;
 

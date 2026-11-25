@@ -62,7 +62,9 @@ fn passes_by_default(name: &[u8]) -> bool {
 /// sudo's check for default-passed variables: no `/` or `%` in the value
 /// (path traversal and printf-style format bugs in locale handling).
 fn value_is_safe(name: &[u8], value: &[u8]) -> bool {
-    if is_shell_function(value) {
+    // A NUL cannot be in a real environment string, but nothing here should
+    // depend on whoever gathered the environment for that.
+    if is_shell_function(value) || value.contains(&0) {
         return false;
     }
     if name == b"TZ" {

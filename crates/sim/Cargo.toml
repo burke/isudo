@@ -17,5 +17,10 @@ isudo-proto = { workspace = true, features = ["api", "pairing"] }
 isudo-relay-core = { workspace = true }
 p256 = { workspace = true }
 
+[dev-dependencies]
+# For the corpus that the Swift implementation is checked against.
+isudo-proto = { workspace = true, features = ["api", "pairing", "testgen"] }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

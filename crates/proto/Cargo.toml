@@ -15,6 +15,9 @@ default = []
 pairing = ["dep:hmac"]
 # JSON types for the relay HTTP API. Not needed by the setuid binary.
 api = ["dep:serde"]
+# Generators for randomized tests, for other crates' tests to share. Enable
+# it only from dev-dependencies: it must not reach a shipped binary.
+testgen = []
 
 [dependencies]
 sha2 = { workspace = true }

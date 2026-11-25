@@ -46,7 +46,7 @@ public struct Delegation: Equatable, Sendable {
     public static func isValid(name: String) -> Bool {
         let bytes = name.utf8.count
         return bytes > 0 && bytes <= maxNameLength
-            && name.trimmingCharacters(in: .whitespacesAndNewlines) == name
+            && name.trimmingWhitespace.unicodeScalars.elementsEqual(name.unicodeScalars)
             && !name.unicodeScalars.contains { $0.properties.generalCategory == .control }
     }
 
@@ -129,8 +129,12 @@ extension Request {
     /// Printable ASCII, and at least one byte of it. Nothing that needs
     /// escaping, nothing invisible, nothing laid out right to left, nothing
     /// that looks like another character.
+    ///
+    /// No backslash either: it is the one printable character that is not
+    /// shown as it is (display doubles it, so that an escape can never be
+    /// mistaken for text).
     private static func isPlain(_ bytes: Data) -> Bool {
-        !bytes.isEmpty && bytes.allSatisfy { (0x20...0x7e).contains($0) }
+        !bytes.isEmpty && bytes.allSatisfy { (0x20...0x7e).contains($0) && $0 != UInt8(ascii: "\\") }
     }
 
     /// True if this request can be read in full on a small screen with

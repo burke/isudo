@@ -32,32 +32,37 @@ public struct PairingOffer: Equatable, Sendable, Codable {
     /// Parses `isudo://pair?v=2&r=<relay>&p=<id>&k=<host key>&s=<secret>&c=<commitment>&n=<name>`.
     /// Exactly these fields, each once, with values of the right size.
     public init(link: String) throws(ParseError) {
-        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(Self.prefix) else { throw ParseError(reason: "not an isudo pairing link") }
-        var fields: [String: String] = [:]
-        for pair in trimmed.dropFirst(Self.prefix.count).split(separator: "&", omittingEmptySubsequences: false) {
-            guard let equals = pair.firstIndex(of: "=") else { throw ParseError(reason: "malformed pairing link") }
-            let key = String(pair[..<equals])
+        // Parsed as bytes, the way the reference does. Splitting a Swift
+        // String works on whole characters, so an "=" or "&" followed by a
+        // combining mark would not count as one, and the two implementations
+        // would disagree about what a link says.
+        let whole = Array(link.trimmingWhitespace.utf8)
+        let prefix = Array(Self.prefix.utf8)
+        guard whole.starts(with: prefix) else { throw ParseError(reason: "not an isudo pairing link") }
+        var fields: [String: [UInt8]] = [:]
+        for pair in whole.dropFirst(prefix.count).split(separator: UInt8(ascii: "&"), omittingEmptySubsequences: false) {
+            guard let equals = pair.firstIndex(of: UInt8(ascii: "=")) else { throw ParseError(reason: "malformed pairing link") }
+            let key = String(decoding: pair[..<equals], as: UTF8.self)
             guard ["v", "r", "p", "k", "s", "c", "n"].contains(key) else {
                 throw ParseError(reason: "unknown field in pairing link")
             }
-            guard fields.updateValue(String(pair[pair.index(after: equals)...]), forKey: key) == nil else {
+            guard fields.updateValue(Array(pair[pair.index(after: equals)...]), forKey: key) == nil else {
                 throw ParseError(reason: "repeated field in pairing link")
             }
         }
-        func field(_ key: String) throws(ParseError) -> String {
+        func field(_ key: String) throws(ParseError) -> [UInt8] {
             guard let value = fields[key] else { throw ParseError(reason: "pairing link is missing a field") }
             return value
         }
         switch try field("v") {
-        case "2": break
+        case Array("2".utf8): break
         // Version 1 had no commitment, which let whoever wrote the link
         // choose the code this phone would show.
-        case "1": throw ParseError(reason: Self.outdated)
+        case Array("1".utf8): throw ParseError(reason: Self.outdated)
         default: throw ParseError(reason: "unsupported pairing link version")
         }
         func binary(_ key: String, count: Int) throws(ParseError) -> Data {
-            let text = try field(key)
+            let text = String(decoding: try field(key), as: UTF8.self)
             do { return try Codec.b64Decode(text, count: count) } catch { throw ParseError(reason: error.reason) }
         }
         relayURL = try Self.percentDecode(try field("r"))
@@ -70,9 +75,9 @@ public struct PairingOffer: Equatable, Sendable, Codable {
         guard hostName.utf8.count <= Proto.maxNameLength else { throw ParseError(reason: "host name is too long") }
     }
 
-    private static func percentDecode(_ text: String) throws(ParseError) -> String {
+    private static func percentDecode(_ text: [UInt8]) throws(ParseError) -> String {
         var out = [UInt8]()
-        var bytes = text.utf8.makeIterator()
+        var bytes = text.makeIterator()
         while let byte = bytes.next() {
             guard byte == UInt8(ascii: "%") else {
                 out.append(byte)
@@ -112,6 +117,20 @@ public struct PairingOffer: Equatable, Sendable, Codable {
 }
 
 extension String {
+    /// Without leading and trailing whitespace, where whitespace is exactly
+    /// Unicode's `White_Space` property: what the reference removes.
+    ///
+    /// Foundation's own trimming also removes the zero-width space and
+    /// others that are not whitespace by that definition, and the two
+    /// implementations must agree on where a link or a name ends.
+    var trimmingWhitespace: String {
+        let scalars = unicodeScalars
+        guard let first = scalars.firstIndex(where: { !$0.properties.isWhitespace }),
+              let last = scalars.lastIndex(where: { !$0.properties.isWhitespace })
+        else { return "" }
+        return String(scalars[first...last])
+    }
+
     /// A string from bytes, or nil unless they are valid UTF-8.
     init?(validatingUTF8 bytes: [UInt8]) {
         guard let string = String(validating: bytes, as: UTF8.self) else { return nil }

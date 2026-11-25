@@ -68,7 +68,10 @@ pub struct SignedDelegation {
     pub phone_sig: [u8; SIG_LEN],
 }
 
-fn name_is_valid(name: &[u8]) -> bool {
+/// Whether a delegate may carry this name: some text, no longer than the
+/// limit, with no surrounding space and no control characters.
+#[must_use]
+pub fn name_is_valid(name: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(name) else { return false };
     !text.is_empty()
         && text.len() <= MAX_DELEGATE_NAME_LEN
@@ -141,8 +144,13 @@ impl SignedDelegation {
 /// Printable ASCII, and at least one byte of it. Nothing that needs
 /// escaping, nothing invisible, nothing laid out right to left, nothing
 /// that looks like another character.
+///
+/// No backslash either. It is printable, but it is the one printable
+/// character that is not shown as it is: display doubles it, so that an
+/// escape can never be mistaken for text. A simple request is one whose
+/// every character appears on screen exactly as it is in the command.
 fn plain(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && bytes.iter().all(|byte| (0x20..=0x7e).contains(byte))
+    !bytes.is_empty() && bytes.iter().all(|byte| (0x20..=0x7e).contains(byte) && *byte != b'\\')
 }
 
 /// True if `request` can be read in full on a small screen with nothing that
@@ -291,7 +299,7 @@ mod tests {
     #[test]
     fn anything_that_needs_explaining_is_not() {
         type Change = fn(&mut Request);
-        let cases: [(&str, Change); 16] = [
+        let cases: [(&str, Change); 18] = [
             ("replaceable program", |r| r.flags |= FLAG_EXE_WRITABLE),
             ("piped input", |r| r.stdin = StdinKind::Pipe),
             ("input from a file", |r| r.stdin = StdinKind::File),
@@ -301,6 +309,8 @@ mod tests {
             ("a control character", |r| r.argv.push(b"a\x1b[2Kb".to_vec())),
             ("a newline", |r| r.argv.push(b"a\nb".to_vec())),
             ("a tab", |r| r.argv.push(b"a\tb".to_vec())),
+            ("a backslash", |r| r.argv.push(b"C:\\temp".to_vec())),
+            ("an escape written out as text", |r| r.argv.push(b"\\x1b[2K".to_vec())),
             ("an invisible character", |r| r.argv.push("a\u{200b}b".as_bytes().to_vec())),
             ("right-to-left text", |r| r.argv.push("/a/\u{5d0}/1".as_bytes().to_vec())),
             ("a lookalike letter", |r| r.argv.push("p\u{430}sswd".as_bytes().to_vec())),

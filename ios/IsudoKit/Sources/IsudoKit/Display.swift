@@ -155,11 +155,20 @@ public enum EnvRisk {
         "PYTHON",
     ]
 
+    private static let exactBytes = Set(exact.map { Array($0.utf8) })
+    private static let prefixBytes = prefixes.map { Array($0.utf8) }
+
     /// True if handing this variable to a root process deserves a warning.
     /// A name that is not valid UTF-8 always does.
+    ///
+    /// Compared as bytes, as the reference does and as the program that
+    /// receives the variable will. Compared as Swift strings, `LD_` followed
+    /// by a combining mark would not begin with `LD_`, and a Kelvin sign
+    /// would pass for a K.
     public static func isRisky(_ name: Data) -> Bool {
-        guard let name = String(validatingUTF8: Array(name)) else { return true }
-        return exact.contains(name) || prefixes.contains(where: name.hasPrefix)
+        let bytes = Array(name)
+        guard String(validatingUTF8: bytes) != nil else { return true }
+        return exactBytes.contains(bytes) || prefixBytes.contains { bytes.starts(with: $0) }
     }
 }
 

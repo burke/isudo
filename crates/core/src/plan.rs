@@ -682,4 +682,37 @@ mod tests {
         let outcome = Outcome::Approved { sig: delegation.phone_sig, delegation: None };
         assert!(matches!(proposal.judge(&phone_pub, outcome, NOW), Verdict::Forged));
     }
+
+    /// Whatever the helper hands back, short of real signatures, runs
+    /// nothing and says nothing in anyone's name. The helper is the caller's
+    /// process: this is the input an attacker controls completely.
+    #[test]
+    fn no_made_up_outcome_is_ever_an_answer() {
+        use isudo_proto::testgen::{cases, Rng};
+        let (phone, phone_pub) = key(7);
+        let (_, genuine) = watch_of(&phone, 20, |_| {});
+        let mut rng = Rng(0x0dd);
+        let mut refused_watch = 0_usize;
+        for _ in 0..cases(4000) {
+            let mut outcome = rng.outcome();
+            // Half the time, under the phone's genuine authorisation of a
+            // watch whose key the helper does not have.
+            if rng.chance(50) {
+                match &mut outcome {
+                    Outcome::Approved { delegation, .. } | Outcome::Denied { delegation, .. } => {
+                        *delegation = Some(genuine.clone());
+                    }
+                    Outcome::Failed { .. } => {}
+                }
+            }
+            let proposal = if rng.chance(50) { simple() } else { proposal(1) };
+            match proposal.judge(&phone_pub, outcome, NOW) {
+                Verdict::Approved(_) => panic!("a made-up outcome was taken as an approval"),
+                Verdict::Denied { .. } => panic!("a made-up outcome was taken as a denial"),
+                Verdict::WatchRefused(_) => refused_watch = refused_watch.saturating_add(1),
+                Verdict::Forged | Verdict::NoAnswer(_) => {}
+            }
+        }
+        assert!(refused_watch > 0, "the watch path was never reached");
+    }
 }

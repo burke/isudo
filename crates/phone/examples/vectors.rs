@@ -131,7 +131,7 @@ fn delegation_vectors(phone: &SigningKey, pairing_id: [u8; 16]) -> Option<Value>
     let base = simple_request(pairing_id);
     let bytes = base.encode().ok()?;
     let digest = sigs::request_digest(&bytes);
-    let cases: [(&str, Change); 14] = [
+    let cases: [(&str, Change); 15] = [
         ("an ordinary command", |_| {}),
         ("no terminal attached", |r| r.stdin = StdinKind::Null),
         ("a program that can be replaced without root", |r| r.flags |= FLAG_EXE_WRITABLE),
@@ -144,6 +144,7 @@ fn delegation_vectors(phone: &SigningKey, pairing_id: [u8; 16]) -> Option<Value>
         ("right-to-left text", |r| r.argv.push("/a/\u{5d0}/1".as_bytes().to_vec())),
         ("bytes that are not text", |r| r.argv.push(vec![0xff, 0xfe])),
         ("an empty argument", |r| r.argv.push(Vec::new())),
+        ("a backslash", |r| r.argv.push(b"C:\\temp".to_vec())),
         ("an accented program path", |r| r.exe = "/opt/caf\u{e9}/bin/x".as_bytes().to_vec()),
         ("as many arguments as allowed", |r| r.argv = vec![b"a".to_vec(); delegation::MAX_SIMPLE_ARGS]),
         ("one argument too many", |r| r.argv = vec![b"a".to_vec(); delegation::MAX_SIMPLE_ARGS + 1]),

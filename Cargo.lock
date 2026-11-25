@@ -969,6 +969,7 @@ dependencies = [
  "isudo-proto",
  "isudo-relay-core",
  "p256",
+ "serde_json",
 ]
 
 [[package]]

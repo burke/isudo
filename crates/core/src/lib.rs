@@ -14,3 +14,6 @@ pub mod env;
 #[cfg(feature = "pairing")]
 pub mod pairing;
 pub mod plan;
+
+#[cfg(test)]
+mod fuzz_tests;

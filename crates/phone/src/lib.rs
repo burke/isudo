@@ -453,12 +453,18 @@ fn approval(key: &SigningKey, card: &Card) -> Answer {
     Answer { decision: Decision::Approve, sig: b64_encode(&signature.to_bytes()), reason: None, delegation: None }
 }
 
-fn denial(key: &SigningKey, card: &Card, reason: &str) -> Answer {
+/// A denial reason cut to the protocol's limit, at a character boundary.
+#[must_use]
+pub fn clip_reason(reason: &str) -> &str {
     let mut end = reason.len().min(MAX_REASON_LEN);
     while !reason.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
-    let reason = reason.get(..end).unwrap_or_default();
+    reason.get(..end).unwrap_or_default()
+}
+
+fn denial(key: &SigningKey, card: &Card, reason: &str) -> Answer {
+    let reason = clip_reason(reason);
     let signature: Signature = key.sign(&sigs::deny_msg(&card.digest, reason.as_bytes()));
     Answer {
         decision: Decision::Deny,

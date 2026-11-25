@@ -19,5 +19,10 @@ pairing = ["isudo-proto/pairing", "isudo-proto/api"]
 isudo-proto = { workspace = true }
 p256 = { workspace = true }
 
+[dev-dependencies]
+# The generators for randomized tests. A dev-dependency, so that this
+# feature is never part of a shipped binary.
+isudo-proto = { workspace = true, features = ["testgen"] }
+
 [lints]
 workspace = true

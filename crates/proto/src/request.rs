@@ -401,60 +401,7 @@ mod tests {
         assert!(EnvOrigin::from_code(0).is_err());
     }
 
-    /// A tiny seedable generator, enough to drive randomized tests without
-    /// a dependency.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            z ^ (z >> 31)
-        }
-
-        fn below(&mut self, bound: usize) -> usize {
-            let bound = u64::try_from(bound.max(1)).unwrap();
-            usize::try_from(self.next().checked_rem(bound).unwrap()).unwrap()
-        }
-
-        fn bytes(&mut self, max_len: usize) -> Vec<u8> {
-            (0..self.below(max_len)).map(|_| self.next().to_le_bytes()[0]).collect()
-        }
-
-        fn array<const N: usize>(&mut self) -> [u8; N] {
-            std::array::from_fn(|_| self.next().to_le_bytes()[0])
-        }
-
-        fn request(&mut self) -> Request {
-            Request {
-                nonce: self.array(),
-                pairing_id: self.array(),
-                issued_at: self.next(),
-                ttl_secs: self.next().to_le_bytes()[0].into(),
-                uid: u32::try_from(self.below(70_000)).unwrap(),
-                gid: u32::try_from(self.below(70_000)).unwrap(),
-                user: self.bytes(12),
-                host: self.bytes(20),
-                cwd: self.bytes(60),
-                exe: self.bytes(60),
-                flags: u8::try_from(self.below(4)).unwrap(),
-                stdin: StdinKind::from_code(u8::try_from(self.below(6)).unwrap()).unwrap(),
-                argv: (0..self.below(6)).map(|_| self.bytes(40)).collect(),
-                env: (0..self.below(4))
-                    .map(|_| EnvVar {
-                        origin: EnvOrigin::from_code(u8::try_from(self.below(3)).unwrap().saturating_add(1)).unwrap(),
-                        name: self.bytes(12),
-                        value: self.bytes(30),
-                    })
-                    .collect(),
-                ancestry: (0..self.below(4))
-                    .map(|_| Ancestor { pid: u32::try_from(self.below(99_999)).unwrap(), name: self.bytes(16) })
-                    .collect(),
-            }
-        }
-    }
+    use crate::testgen::{cases, Rng};
 
     /// Encoding is injective and decoding is its exact inverse: every
     /// request has one byte string, and a byte string that decodes at all
@@ -463,7 +410,7 @@ mod tests {
     #[test]
     fn random_requests_round_trip() {
         let mut rng = Rng(0x15_0d0);
-        for _ in 0..2000 {
+        for _ in 0..cases(2000) {
             let request = rng.request();
             let bytes = request.encode().unwrap();
             assert_eq!(Request::decode(&bytes).unwrap(), request);
@@ -477,25 +424,9 @@ mod tests {
     fn mutated_bytes_never_panic_and_never_alias() {
         let mut rng = Rng(0xfeed);
         let mut accepted = 0_u32;
-        for _ in 0..4000 {
+        for _ in 0..cases(4000) {
             let mut bytes = rng.request().encode().unwrap();
-            for _ in 0..=rng.below(3) {
-                if bytes.is_empty() {
-                    break;
-                }
-                match rng.below(4) {
-                    0 => {
-                        let at = rng.below(bytes.len());
-                        bytes[at] ^= 1_u8.rotate_left(u32::try_from(rng.below(8)).unwrap());
-                    }
-                    1 => bytes.truncate(rng.below(bytes.len())),
-                    2 => bytes.extend(rng.bytes(8)),
-                    _ => {
-                        let at = rng.below(bytes.len());
-                        bytes[at] = rng.next().to_le_bytes()[0];
-                    }
-                }
-            }
+            rng.mutate(&mut bytes);
             if let Ok(decoded) = Request::decode(&bytes) {
                 accepted = accepted.saturating_add(1);
                 assert_eq!(decoded.encode().unwrap(), bytes, "a request decoded from bytes that are not its encoding");
@@ -509,7 +440,7 @@ mod tests {
     #[test]
     fn random_garbage_never_panics() {
         let mut rng = Rng(7);
-        for _ in 0..4000 {
+        for _ in 0..cases(4000) {
             let mut bytes = rng.bytes(300);
             if rng.below(2) == 0 {
                 // Give it a valid header so the fields get exercised.

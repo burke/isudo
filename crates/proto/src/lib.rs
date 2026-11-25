@@ -11,8 +11,12 @@ pub mod codec;
 pub mod delegation;
 pub mod envrisk;
 pub mod frame;
+#[cfg(test)]
+mod fuzz_tests;
 pub mod request;
 pub mod sigs;
+#[cfg(any(test, feature = "testgen"))]
+pub mod testgen;
 pub mod text;
 pub mod wire;
 

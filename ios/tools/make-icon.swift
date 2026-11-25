@@ -58,7 +58,10 @@ func draw(_ variant: Variant) -> CGImage {
     let space = CGColorSpace(name: CGColorSpace.sRGB)!
     let context = CGContext(
         data: nil, width: Int(size), height: Int(size), bitsPerComponent: 8, bytesPerRow: 0, space: space,
-        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        // The standard icon fills its square and must have no alpha channel:
+        // the App Store refuses an icon that has one. The other two are
+        // drawn on nothing, for the system to put a background behind.
+        bitmapInfo: (variant == .standard ? CGImageAlphaInfo.noneSkipLast : .premultipliedLast).rawValue
     )!
 
     if variant == .standard {

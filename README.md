@@ -376,12 +376,12 @@ inherits from its caller, which is what most of `crates/isudo` is.
 **Can I approve for the next ten minutes?** No, deliberately. An approval
 covers one request.
 
-**Has the watch app been tried on a real watch?** Not yet. Its logic is
-tested against the same vectors as the phone's, the computer's side is
-tested as real setuid root with a stand-in watch, and both apps run the
-whole flow together in paired Simulators. How watchOS behaves on a
-wrist (the key's protection, answering from inside a notification, reaching
-a relay on a private network) is untested; see [ios/README.md](ios/README.md).
+**Has the watch app been tried on a real watch?** On one: an Apple Watch
+Series 12, where approving, denying, notifications, refusing once off the
+wrist and root's off switch all behaved as described. Beyond that it rests
+on tests: its logic against the same vectors as the phone's, the computer's
+side as real setuid root with a stand-in watch, and both apps together in
+paired Simulators. See [ios/README.md](ios/README.md).
 
 **Android?** Not yet. `crates/phone` is the reference for what a phone must
 check and sign, and `testdata/vectors.json` is what an implementation is

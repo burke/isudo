@@ -76,18 +76,46 @@ watch Simulator, against a local relay and a development build of isudo:
 the phone authorises the watch, the watch approves one request by holding
 its button and denies another that only the phone could approve.
 
-**Not yet tried on a real watch.** That run passes, but a Simulator has no
-wrist, no passcode and no Secure Enclave policy, and its notifications do
-not come from Apple. These depend on how watchOS behaves on a
-wrist, and each has a fallback:
+**Tried on one real watch** (an Apple Watch Series 12 on watchOS 27, with
+an iPhone 16 Pro, installed through TestFlight). These six checks all did
+what they should:
 
-| Unknown | If it does not work as hoped |
+| Check | Expected |
 |---|---|
-| Whether the Secure Enclave key can be bound to wrist detection, beyond the check the app asks the system for before signing | The key is still usable only while the watch is unlocked; presence then rests on that check |
-| Whether a request can be approved from inside its notification | Tapping the notification opens the app on the same request |
-| Whether the relay's push, mirrored from the phone, reaches the watch with the sealed request still in it | The app fetches it from the relay when opened |
-| Whether the watch can reach a relay on a private network such as a tailnet | Answers go through the phone, which only carries them; the watch must be near the phone |
-| Whether clearing the notification on the phone clears it on the watch | The phone also tells the watch directly; a stale notification shows the request as expired or answered |
+| A simple request with the watch app open | The terminal says "or its watch"; holding the button on the watch runs it |
+| A request that names a variable | The watch says "Review on iPhone" and can deny it, with a reason the caller sees |
+| A request with the app closed and the phone locked | A notification on the wrist |
+| A request while the phone is in use | It appears on the phone and the wrist stays quiet |
+| Approving with the watch taken off | It refuses to sign |
+| After `sudo isudo-admin watch off` | The watch is sent nothing and the phone carries on |
+
+That is one watch, one phone and one relay. Where watchOS might behave
+differently elsewhere, the app has somewhere to fall back to:
+
+| If this does not work | Then |
+|---|---|
+| Approving from inside the notification | Tapping the notification opens the app on the same request |
+| The pushed notification carrying the sealed request | The app fetches it from the relay when opened |
+| The watch reaching the relay itself, as on a private network | Answers go through the phone, which only carries them; the watch must be near the phone |
+| Clearing the notification on the phone clearing it on the watch | The phone also tells the watch directly; a stale notification shows the request as expired or answered |
+
+### Getting it onto a watch
+
+Running the `Isudo` scheme from Xcode installs the watch app too, if Xcode
+can reach the watch: it must be listed in Xcode's devices window, which is
+also what makes the Developer Mode switch appear on the watch. If Xcode
+never finds the watch (it can fail to, for no reason it will give), use
+TestFlight, which needs neither:
+
+```sh
+./testflight.sh archive     # a release build of both apps, signed
+./testflight.sh upload      # to App Store Connect
+```
+
+Create the app record for your bundle identifier in App Store Connect
+first, add yourself to an internal testing group, and install from the
+TestFlight app on the phone. A TestFlight build uses Apple's production
+push service, so the relay's APNs key must allow production.
 
 Away from the phone the watch gets no notifications in this version: they
 are mirrored from the phone.

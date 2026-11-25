@@ -15,10 +15,18 @@ pub const MAX_CONFIG_LEN: usize = 16 * 1024;
 // whoever can write to a searched directory decides what a bare command name
 // means. isudo also skips, at run time, any listed directory that someone
 // other than root can write to.
+//
+// A build may replace it with ISUDO_DEFAULT_SECURE_PATH: NixOS keeps nothing
+// in these directories, so its package sets the system profile instead.
 #[cfg(target_os = "macos")]
-pub const DEFAULT_SECURE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+const PLATFORM_SECURE_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 #[cfg(not(target_os = "macos"))]
-pub const DEFAULT_SECURE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const PLATFORM_SECURE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+pub const DEFAULT_SECURE_PATH: &str = match option_env!("ISUDO_DEFAULT_SECURE_PATH") {
+    Some(path) => path,
+    None => PLATFORM_SECURE_PATH,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pairing {

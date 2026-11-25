@@ -17,6 +17,10 @@ const LIBEXEC_DIR: &str = match option_env!("ISUDO_LIBEXEC_DIR") {
     None => "/usr/local/libexec",
 };
 
+/// Where the setuid `isudo` is, if not beside this program. NixOS cannot
+/// store a setuid file, so its copy is a wrapper in /run/wrappers/bin.
+const SETUID_PATH: Option<&str> = option_env!("ISUDO_SETUID_PATH");
+
 const SETUID: u32 = 0o4000;
 const SETGID: u32 = 0o2000;
 const STICKY: u32 = 0o1000;
@@ -83,7 +87,7 @@ pub(crate) fn run(pairing_file: &Path) -> Result<(), String> {
         .and_then(std::fs::canonicalize)
         .map_err(|e| format!("cannot find this program's own location: {e}"))?;
     let bin_dir = own.parent().ok_or("this program has no parent directory")?;
-    let isudo = bin_dir.join("isudo");
+    let isudo = SETUID_PATH.map_or_else(|| bin_dir.join("isudo"), PathBuf::from);
     let helper = PathBuf::from(LIBEXEC_DIR).join("isudo-helper");
 
     say("Checking the isudo installation:");

@@ -136,6 +136,20 @@ directory from the programs up to `/` must belong to root, and on many Macs
 swap `isudo-admin` before you next run it with `sudo`. `isudo-admin check`
 verifies the installation, and pairing refuses to start if it fails.
 
+On NixOS, use the flake's module instead; `make install` would put the
+programs where NixOS does not look, and the store cannot hold a setuid file:
+
+```nix
+# flake.nix: inputs.isudo.url = "github:burke/isudo";
+imports = [ isudo.nixosModules.default ];
+programs.isudo.enable = true;          # setuid wrapper in /run/wrappers/bin
+services.isudo-relay.enable = true;    # on 127.0.0.1:8787; options for APNs and a registration token
+```
+
+That build searches `/run/wrappers/bin:/run/current-system/sw/bin` for bare
+command names, and `isudo-admin check` looks for the setuid copy in
+`/run/wrappers/bin`. Then pair as in step 4.
+
 ### 2. Run the relay
 
 The relay is one small program. It needs no privilege and stores nothing

@@ -12,7 +12,9 @@
       # libraries with the system linker, not against dylibs in the Nix store.
       devShells = forAll (pkgs: {
         default = pkgs.mkShellNoCC {
-          packages = with pkgs; [ cargo rustc clippy rustfmt rust-analyzer cargo-nextest proverif xcodegen ];
+          packages = with pkgs; [ cargo rustc clippy rustfmt rust-analyzer cargo-nextest proverif ]
+            # For generating the iOS app's Xcode project; macOS only.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ xcodegen ];
         };
       });
     };

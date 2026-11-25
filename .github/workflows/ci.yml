@@ -8,15 +8,18 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to exact commits, so that what runs here changes only
+# when this file does.
+
 jobs:
   check:
     name: lint, test, simulate, prove
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Strict clippy and all tests
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - name: Formatting, strict clippy and all tests
         run: nix develop -c make check
       - name: Deterministic simulation, more seeds
         run: nix develop -c make sim SEEDS=300
@@ -27,19 +30,19 @@ jobs:
     name: real setuid root, in a container
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: make test-linux
 
-  # macOS runners are billed at ten times the rate for private repositories,
-  # so this job waits until the repository is public.
+  # Skipped on private forks, where macOS runners are billed at ten times
+  # the rate.
   macos:
     name: build and test on macOS
     if: ${{ !github.event.repository.private }}
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
       - run: nix develop -c make check
       - name: Phone logic in Swift, against the shared vectors
         run: swift test

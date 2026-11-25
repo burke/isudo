@@ -221,12 +221,7 @@ async fn submit(State(app): Shared, Json(body): Json<SubmitRequest>) -> Done {
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn answer(
-    State(app): Shared,
-    Path(request): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<Answer>,
-) -> Done {
+async fn answer(State(app): Shared, Path(request): Path<String>, headers: HeaderMap, Json(body): Json<Answer>) -> Done {
     app.step(|relay, now| relay.answer(now, &request, bearer(&headers), body))?;
     app.answered.notify_waiters();
     Ok(StatusCode::NO_CONTENT)
@@ -325,8 +320,7 @@ fn load_settings() -> Result<(), String> {
 
 /// Reads the APNs settings: all four or none.
 fn apns_from_env() -> Result<Option<Apns>, String> {
-    const NAMES: [&str; 4] =
-        ["ISUDO_APNS_KEY_FILE", "ISUDO_APNS_KEY_ID", "ISUDO_APNS_TEAM_ID", "ISUDO_APNS_TOPIC"];
+    const NAMES: [&str; 4] = ["ISUDO_APNS_KEY_FILE", "ISUDO_APNS_KEY_ID", "ISUDO_APNS_TEAM_ID", "ISUDO_APNS_TOPIC"];
     match NAMES.map(env) {
         [None, None, None, None] => Ok(None),
         [Some(key_file), Some(key_id), Some(team_id), Some(topic)] => {
@@ -361,12 +355,8 @@ async fn serve() -> Result<(), String> {
     let listen = env("ISUDO_RELAY_LISTEN").unwrap_or_else(|| "127.0.0.1:8787".to_owned());
     let state_file = env("ISUDO_RELAY_STATE").map(PathBuf::from);
     let apns = apns_from_env()?;
-    let app = Arc::new(App {
-        relay: Mutex::new(load(state_file.as_ref())?),
-        answered: Notify::new(),
-        apns,
-        state_file,
-    });
+    let app =
+        Arc::new(App { relay: Mutex::new(load(state_file.as_ref())?), answered: Notify::new(), apns, state_file });
 
     let sweeper = Arc::clone(&app);
     drop(tokio::spawn(async move {

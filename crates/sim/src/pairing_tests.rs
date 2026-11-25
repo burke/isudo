@@ -306,8 +306,10 @@ fn a_pairing_code_written_by_an_attacker_cannot_steer_the_code() {
     let fake = host_named(&mut rng, "simhost", "https://attacker.invalid");
     let mut victim = Pairing::begin(&fake.offer, &rng.bytes()).unwrap();
     let answer = view(&victim, "iPhone");
-    let (sign_pub, kem_pub) =
-        (pairing::decode_pubkey(&answer.phone_sign_pub).unwrap(), pairing::decode_pubkey(&answer.phone_kem_pub).unwrap());
+    let (sign_pub, kem_pub) = (
+        pairing::decode_pubkey(&answer.phone_sign_pub).unwrap(),
+        pairing::decode_pubkey(&answer.phone_kem_pub).unwrap(),
+    );
     let phone_nonce: [u8; 16] = isudo_proto::codec::b64_decode_array(&answer.phone_nonce).unwrap();
     let parties = Parties {
         pairing_id: &fake.offer.pairing_id,
@@ -457,11 +459,7 @@ fn malformed_answers_are_rejected_before_any_prompt() {
     };
     let nonce: [u8; 16] = isudo_proto::codec::b64_decode_array(&honest.phone_nonce).unwrap();
     let mac = pairing::claim_mac(&host.offer.secret, &parties, &nonce, b"My Phone");
-    let crafted = ClaimView {
-        phone_sign_pub: b64_encode(&off_curve),
-        claim_mac: b64_encode(&mac),
-        ..honest
-    };
+    let crafted = ClaimView { phone_sign_pub: b64_encode(&off_curve), claim_mac: b64_encode(&mac), ..honest };
     assert!(b64_decode(&crafted.claim_mac).is_ok());
     assert_eq!(host.accept(&crafted).err(), Some(ClaimError::Malformed));
 }

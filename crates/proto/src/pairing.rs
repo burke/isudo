@@ -310,12 +310,7 @@ mod tests {
     const KEM: [u8; PUBKEY_LEN] = [3; PUBKEY_LEN];
 
     fn parties(offer: &Offer) -> Parties<'_> {
-        Parties {
-            pairing_id: &offer.pairing_id,
-            host_pub: &offer.host_pub,
-            phone_sign_pub: &SIGN,
-            phone_kem_pub: &KEM,
-        }
+        Parties { pairing_id: &offer.pairing_id, host_pub: &offer.host_pub, phone_sign_pub: &SIGN, phone_kem_pub: &KEM }
     }
 
     #[test]

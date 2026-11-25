@@ -23,14 +23,15 @@ build:
 	ISUDO_LIBEXEC_DIR=$(LIBEXEC) cargo build --release --locked \
 	  -p isudo -p isudo-helper -p isudo-admin -p isudo-relay -p isudo-devphone
 
-# Everything CI should hold: strict lints in both feature configurations,
-# then the tests.
+# Everything CI should hold: formatting, strict lints in both feature
+# configurations, then the tests.
 check: lint test
 
 # `cargo-clippy clippy` rather than `cargo clippy`: cargo prefers a
 # cargo-clippy in ~/.cargo/bin (a rustup shim, possibly for an old
 # toolchain) over the one on PATH.
 lint:
+	cargo fmt --all --check
 	cargo-clippy clippy --workspace --all-targets -- -D warnings
 	cargo-clippy clippy --workspace --all-targets --all-features -- -D warnings
 

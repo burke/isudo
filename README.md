@@ -349,7 +349,7 @@ tested against.
 ## Development
 
 ```sh
-make check        # clippy at its strictest, then every test
+make check        # formatting, clippy at its strictest, then every test
 make sim          # deterministic simulation, many seeds
 make formal       # ProVerif: the protocol's properties, proved symbolically
 make test-linux   # real setuid root in a container, attacked

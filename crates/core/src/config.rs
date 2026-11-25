@@ -155,9 +155,7 @@ pub fn parse(text: &[u8]) -> Result<Pairing, String> {
         Some(value) => {
             let secs: u32 = value.parse().map_err(|e| format!("\"timeout_secs\": {e}"))?;
             if !(MIN_TIMEOUT_SECS..=MAX_TIMEOUT_SECS).contains(&secs) {
-                return Err(format!(
-                    "\"timeout_secs\" must be between {MIN_TIMEOUT_SECS} and {MAX_TIMEOUT_SECS}"
-                ));
+                return Err(format!("\"timeout_secs\" must be between {MIN_TIMEOUT_SECS} and {MAX_TIMEOUT_SECS}"));
             }
             secs
         }

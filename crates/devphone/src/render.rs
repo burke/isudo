@@ -21,8 +21,16 @@ pub(crate) fn card(request: &Request, seconds_left: u64) -> String {
 
     let user = if request.user.is_empty() { "unknown user".to_owned() } else { escape(&request.user) };
     out.push_str(
-        &["  .- ", &escape(&request.host), " : ", &user, " (uid ", &request.uid.to_string(), ") wants to run as root\n"]
-            .concat(),
+        &[
+            "  .- ",
+            &escape(&request.host),
+            " : ",
+            &user,
+            " (uid ",
+            &request.uid.to_string(),
+            ") wants to run as root\n",
+        ]
+        .concat(),
     );
     line(&mut out, &escape(&request.exe));
     for arg in &request.argv {

@@ -59,10 +59,7 @@ fn request(pairing_id: [u8; 16]) -> Request {
                 value: b"--require /tmp/x.js".to_vec(),
             },
         ],
-        ancestry: vec![
-            Ancestor { pid: 4242, name: b"zsh".to_vec() },
-            Ancestor { pid: 4200, name: b"claude".to_vec() },
-        ],
+        ancestry: vec![Ancestor { pid: 4242, name: b"zsh".to_vec() }, Ancestor { pid: 4200, name: b"claude".to_vec() }],
     }
 }
 
@@ -140,8 +137,21 @@ fn build() -> Option<Value> {
         b"bad\xff\xfe\x80utf8 \xc0\x0a",
         b"",
     ];
-    let risky = ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "BASH_ENV", "PYTHONPATH", "NODE_OPTIONS", "PATH",
-        "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL", "PERL5LIB", "BASH_FUNC_x%%", "HOME", "RUBYOPT", "TMPDIR"];
+    let risky = [
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "BASH_ENV",
+        "PYTHONPATH",
+        "NODE_OPTIONS",
+        "PATH",
+        "GIT_SSH_COMMAND",
+        "GIT_CONFIG_GLOBAL",
+        "PERL5LIB",
+        "BASH_FUNC_x%%",
+        "HOME",
+        "RUBYOPT",
+        "TMPDIR",
+    ];
     let safe = ["TERM", "LANG", "LC_ALL", "TZ", "DEBUG", "MY_APP_TOKEN", "CI", "NO_COLOR", "FOO"];
     if !risky.iter().all(|n| is_risky(n.as_bytes())) || safe.iter().any(|n| is_risky(n.as_bytes())) {
         return None;

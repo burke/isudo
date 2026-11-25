@@ -167,12 +167,8 @@ impl Pairing {
     pub fn begin(offer: &Offer, seed: &[u8; 32]) -> Result<Self, PairingError> {
         let _host = VerifyingKey::from_sec1_bytes(&offer.host_pub).map_err(|_e| PairingError::BadOffer)?;
         let sign_key = SigningKey::from_slice(&derive(seed, b"sign")).map_err(|_e| PairingError::BadSeed)?;
-        let sign_pub = sign_key
-            .verifying_key()
-            .to_sec1_point(false)
-            .as_bytes()
-            .try_into()
-            .map_err(|_e| PairingError::BadSeed)?;
+        let sign_pub =
+            sign_key.verifying_key().to_sec1_point(false).as_bytes().try_into().map_err(|_e| PairingError::BadSeed)?;
         let (kem_private, kem_pub) = envelope::derive(&derive(seed, b"kem")).map_err(|_e| PairingError::BadSeed)?;
         Ok(Self {
             id: offer.pairing_id,
@@ -297,7 +293,11 @@ impl Pairing {
         if self.host_nonce.is_none() {
             let claims_progress = matches!(status.state, PairingState::Acknowledged | PairingState::Active);
             let Some(ack) = &status.ack else {
-                return if claims_progress { Err(PairingError::AnotherPhoneWasAccepted) } else { Ok(Progress::Waiting) };
+                return if claims_progress {
+                    Err(PairingError::AnotherPhoneWasAccepted)
+                } else {
+                    Ok(Progress::Waiting)
+                };
             };
             let nonce: [u8; HOST_NONCE_LEN] =
                 b64_decode_array(&ack.nonce).map_err(|_e| PairingError::AnotherPhoneWasAccepted)?;

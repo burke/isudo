@@ -135,16 +135,15 @@ fn unpair(options: &Options) -> Result<(), String> {
     };
     // Tell the relay, so the phone learns of it. The pairing file is removed
     // whether or not that works: removing it is what revokes the phone.
-    let told = HostKey::new(&pairing.host_key).ok_or_else(|| "the stored host key is invalid".to_owned()).and_then(
-        |key| {
+    let told =
+        HostKey::new(&pairing.host_key).ok_or_else(|| "the stored host key is invalid".to_owned()).and_then(|key| {
             let relay = Relay::new(&pairing.relay_url).map_err(|e| e.to_string())?;
             let body = Revoke { host_sig: b64_encode(&key.sign(&sigs::pair_revoke_msg(&pairing.id))) };
             match relay.revoke_as_host(&hex_encode(&pairing.id), &body) {
                 Ok(()) | Err(RelayError::Status(404)) => Ok(()),
                 Err(e) => Err(e.to_string()),
             }
-        },
-    );
+        });
     std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
     say(&format!("Unpaired from {}.", escape(pairing.phone_name.as_bytes())));
     if let Err(why) = told {

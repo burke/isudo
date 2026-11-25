@@ -176,8 +176,8 @@ fn valid_name(name: &str) -> bool {
 }
 
 fn valid_device(device: &DeviceUpdate) -> bool {
-    let token_ok = (32..=200).contains(&device.apns_token.len())
-        && device.apns_token.bytes().all(|b| b.is_ascii_hexdigit());
+    let token_ok =
+        (32..=200).contains(&device.apns_token.len()) && device.apns_token.bytes().all(|b| b.is_ascii_hexdigit());
     token_ok && matches!(device.apns_env.as_str(), "sandbox" | "production")
 }
 
@@ -337,8 +337,7 @@ impl Relay {
         let (Some(claim), None) = (&record.claim, &record.acked) else {
             return Err(Reject::Conflict);
         };
-        let (Ok(sign_pub), Ok(kem_pub)) =
-            (decode_pubkey(&claim.phone_sign_pub), decode_pubkey(&claim.phone_kem_pub))
+        let (Ok(sign_pub), Ok(kem_pub)) = (decode_pubkey(&claim.phone_sign_pub), decode_pubkey(&claim.phone_kem_pub))
         else {
             return Err(Reject::Invalid);
         };
@@ -364,8 +363,7 @@ impl Relay {
         let (Some(claim), Some(_), None) = (&record.claim, &record.acked, &record.confirmed) else {
             return Err(Reject::Conflict);
         };
-        let (Ok(sign_pub), Ok(kem_pub)) =
-            (decode_pubkey(&claim.phone_sign_pub), decode_pubkey(&claim.phone_kem_pub))
+        let (Ok(sign_pub), Ok(kem_pub)) = (decode_pubkey(&claim.phone_sign_pub), decode_pubkey(&claim.phone_kem_pub))
         else {
             return Err(Reject::Invalid);
         };

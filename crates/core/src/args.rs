@@ -174,10 +174,7 @@ mod tests {
     fn assignments_and_preserve() {
         let inv = run(&["--preserve-env=FOO,BAR", "DEBUG=1", "X=a=b", "make", "install"]);
         assert_eq!(inv.preserve, vec![b"FOO".to_vec(), b"BAR".to_vec()]);
-        assert_eq!(
-            inv.assignments,
-            vec![(b"DEBUG".to_vec(), b"1".to_vec()), (b"X".to_vec(), b"a=b".to_vec())]
-        );
+        assert_eq!(inv.assignments, vec![(b"DEBUG".to_vec(), b"1".to_vec()), (b"X".to_vec(), b"a=b".to_vec())]);
         assert_eq!(inv.command, vec![b"make".to_vec(), b"install".to_vec()]);
     }
 

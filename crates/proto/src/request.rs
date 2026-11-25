@@ -293,11 +293,7 @@ mod tests {
             stdin: StdinKind::Pipe,
             argv: vec![b"tee".to_vec(), b"/etc/hosts".to_vec()],
             env: vec![
-                EnvVar {
-                    origin: EnvOrigin::Default,
-                    name: b"TERM".to_vec(),
-                    value: b"xterm-256color".to_vec(),
-                },
+                EnvVar { origin: EnvOrigin::Default, name: b"TERM".to_vec(), value: b"xterm-256color".to_vec() },
                 EnvVar {
                     origin: EnvOrigin::Explicit,
                     name: b"NODE_OPTIONS".to_vec(),

@@ -154,19 +154,13 @@ pub fn build(
         explicit(&mut set, name, value)?;
     }
 
-    let described: Vec<EnvVar> = entries
-        .into_iter()
-        .map(|(name, value, origin)| EnvVar { origin, name, value })
-        .collect();
+    let described: Vec<EnvVar> =
+        entries.into_iter().map(|(name, value, origin)| EnvVar { origin, name, value }).collect();
     let envp = described.iter().map(|var| [var.name.as_slice(), b"=", var.value.as_slice()].concat()).collect();
     Ok(Built { envp, described })
 }
 
-fn explicit(
-    set: &mut impl FnMut(&[u8], &[u8], EnvOrigin),
-    name: &[u8],
-    value: &[u8],
-) -> Result<(), String> {
+fn explicit(set: &mut impl FnMut(&[u8], &[u8], EnvOrigin), name: &[u8], value: &[u8]) -> Result<(), String> {
     if is_shell_function(value) {
         return Err(format!(
             "{} holds an exported shell function, which cannot be passed to a root command",

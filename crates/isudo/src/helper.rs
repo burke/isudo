@@ -31,8 +31,7 @@ const PIPE_CHUNK: usize = 512;
 
 /// Variables the helper may see. It runs as the caller, so this is not a
 /// security boundary; it keeps proxies working and everything else out.
-const HELPER_ENV: [&[u8]; 6] =
-    [b"HTTPS_PROXY", b"https_proxy", b"ALL_PROXY", b"all_proxy", b"NO_PROXY", b"no_proxy"];
+const HELPER_ENV: [&[u8]; 6] = [b"HTTPS_PROXY", b"https_proxy", b"ALL_PROXY", b"all_proxy", b"NO_PROXY", b"no_proxy"];
 
 #[derive(Debug)]
 pub(crate) enum Answer {
@@ -50,8 +49,7 @@ pub(crate) fn run(
 ) -> Result<Answer, Fatal> {
     let job_bytes = job.encode().map_err(|e| Fatal::new(format!("cannot encode the request: {e}")))?;
     let wait = Duration::from_secs(u64::from(job.timeout_secs)).saturating_add(GRACE);
-    let deadline =
-        Instant::now().checked_add(wait).ok_or_else(|| Fatal::new("the approval timeout is too long"))?;
+    let deadline = Instant::now().checked_add(wait).ok_or_else(|| Fatal::new("the approval timeout is too long"))?;
 
     let mut command = Command::new(OsStr::from_bytes(helper_path));
     let _ = command
@@ -134,6 +132,5 @@ fn converse(child: &mut Child, job: &[u8], deadline: Instant) -> Result<Answer, 
     if answer.is_empty() {
         return Ok(Answer::Nothing("the helper exited without an answer"));
     }
-    Ok(Outcome::decode(&answer)
-        .map_or(Answer::Nothing("the helper returned a malformed answer"), Answer::Outcome))
+    Ok(Outcome::decode(&answer).map_or(Answer::Nothing("the helper returned a malformed answer"), Answer::Outcome))
 }

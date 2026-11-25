@@ -83,11 +83,8 @@ impl Apns {
 
     /// Sends one push. Returns a short description of any failure, for the log.
     pub(crate) async fn send(&self, push: &Push, now: u64) -> Result<(), String> {
-        let host = if push.device.apns_env == "production" {
-            "api.push.apple.com"
-        } else {
-            "api.sandbox.push.apple.com"
-        };
+        let host =
+            if push.device.apns_env == "production" { "api.push.apple.com" } else { "api.sandbox.push.apple.com" };
         let url = ["https://", host, "/3/device/", &push.device.apns_token].concat();
         let body = [push.host_name.as_str(), " wants to run a command as root"].concat();
         let payload = json!({

@@ -62,10 +62,7 @@ mod tests {
             outcome_of(answer(Decision::Deny, Some("no"))),
             Ok(Outcome::Denied { sig: [7; 64], reason: b"no".to_vec() })
         );
-        assert_eq!(
-            outcome_of(answer(Decision::Deny, None)),
-            Ok(Outcome::Denied { sig: [7; 64], reason: Vec::new() })
-        );
+        assert_eq!(outcome_of(answer(Decision::Deny, None)), Ok(Outcome::Denied { sig: [7; 64], reason: Vec::new() }));
     }
 
     #[test]

@@ -277,7 +277,9 @@ fn propose(
         ancestry: ancestry::collect(sys::parent_pid()),
     };
     Proposal::describe(plan, context).map_err(|e| match e {
-        WireError::TooLarge(_) => Fatal::new("the command is too large to be reviewed on a phone (the limit is 64 KiB)"),
+        WireError::TooLarge(_) => {
+            Fatal::new("the command is too large to be reviewed on a phone (the limit is 64 KiB)")
+        }
         WireError::Truncated(_) | WireError::TrailingBytes(_) | WireError::Invalid(_) => {
             Fatal::new(format!("cannot encode the request: {e}"))
         }

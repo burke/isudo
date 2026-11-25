@@ -51,7 +51,7 @@ that pairing is shown. Device builds do not contain the software key at all:
 on a phone without Face ID or Touch ID set up, pairing is refused.
 
 Debug builds accept `-fixture NAME` (`empty`, `quiet`, `plain`, `risky`,
-`long`, `multi`, `simulator`, `waiting`, `code`, `claimed`, `otherphone`,
-`paired`, `scan`) and
+`long`, `multi`, `simulator`, `scan`, `confirm`, `confirmlink`, `waiting`,
+`code`, `claimed`, `otherphone`, `steered`, `paired`) and
 `-appearance light|dark` to show sample data. Sample data cannot be signed
 or sent anywhere.

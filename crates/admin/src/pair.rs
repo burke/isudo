@@ -216,10 +216,8 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
     })?;
     // Tell that phone, and only that phone, that its answer is the one
     // accepted. It will not show a code until it has verified this.
-    let ack = Ack {
-        nonce: b64_encode(accepted.host_nonce()),
-        host_sig: b64_encode(&host_key.sign(&accepted.ack_message())),
-    };
+    let ack =
+        Ack { nonce: b64_encode(accepted.host_nonce()), host_sig: b64_encode(&host_key.sign(&accepted.ack_message())) };
     relay.acknowledge(&pairing_id, &ack).map_err(|e| e.to_string())?;
     let shown_name = escape(accepted.phone_name().as_bytes());
     say(&format!("\n{shown_name} scanned the code and will now show six digits."));

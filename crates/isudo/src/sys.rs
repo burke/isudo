@@ -269,7 +269,8 @@ pub(crate) fn disable_core_dumps() -> Result<CoreLimit> {
 
 pub(crate) fn restore_core_limit(saved: &CoreLimit) -> Result<()> {
     // SAFETY: the pointer is to a live rlimit.
-    let _ = check(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const saved.0) }, "cannot restore the core dump limit")?;
+    let _ =
+        check(unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const saved.0) }, "cannot restore the core dump limit")?;
     Ok(())
 }
 
@@ -351,10 +352,7 @@ pub(crate) fn assume_root_identity() -> bool {
     let mut groups: [libc::gid_t; 8] = [libc::gid_t::MAX; 8];
     // SAFETY: the buffer holds eight entries, and eight is passed as its size.
     let count = unsafe { libc::getgroups(8, groups.as_mut_ptr()) };
-    usize::try_from(count)
-        .ok()
-        .and_then(|n| groups.get(..n))
-        .is_some_and(|set| set.iter().all(|group| *group == 0))
+    usize::try_from(count).ok().and_then(|n| groups.get(..n)).is_some_and(|set| set.iter().all(|group| *group == 0))
 }
 
 /// Permanently becomes the caller. Used in the child that runs the helper.

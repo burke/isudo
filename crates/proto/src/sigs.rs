@@ -45,11 +45,7 @@ pub fn host_request_msg(request: &[u8]) -> Vec<u8> {
 /// Signed by the host key. Lets the relay accept a request (and spend a push
 /// notification on it) without being able to read it.
 #[must_use]
-pub fn ticket_msg(
-    pairing_id: &[u8; PAIRING_ID_LEN],
-    request_id: &[u8; REQUEST_ID_LEN],
-    expires_at: u64,
-) -> Vec<u8> {
+pub fn ticket_msg(pairing_id: &[u8; PAIRING_ID_LEN], request_id: &[u8; REQUEST_ID_LEN], expires_at: u64) -> Vec<u8> {
     [CTX_TICKET, pairing_id, request_id, &expires_at.to_be_bytes()].concat()
 }
 

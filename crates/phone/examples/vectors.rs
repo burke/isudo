@@ -10,9 +10,10 @@ use std::io::Write as _;
 
 use isudo_client::envelope;
 use isudo_proto::codec::{b64_encode, hex_encode};
+use isudo_proto::delegation::{self, simple_enough, Delegation, SignedDelegation};
 use isudo_proto::envrisk::is_risky;
 use isudo_proto::pairing::{self, Offer, Parties};
-use isudo_proto::request::{Ancestor, EnvOrigin, EnvVar, Request, StdinKind, FLAG_EXE_WRITABLE};
+use isudo_proto::request::{Ancestor, EnvOrigin, EnvVar, Request, StdinKind, FLAG_DELEGABLE, FLAG_EXE_WRITABLE};
 use isudo_proto::text::escape;
 use isudo_proto::{sigs, PUBKEY_LEN, SIG_LEN};
 use p256::ecdsa::signature::Signer as _;
@@ -88,6 +89,104 @@ fn request_json(request: &Request) -> Value {
             "name_hex": hex_encode(&a.name),
         })).collect::<Vec<_>>(),
     })
+}
+
+/// A request a watch may approve, and variations on it that it may not.
+fn simple_request(pairing_id: [u8; 16]) -> Request {
+    Request {
+        nonce: [0x22; 32],
+        pairing_id,
+        issued_at: 1_795_000_000,
+        ttl_secs: 120,
+        uid: 501,
+        gid: 20,
+        user: b"burke".to_vec(),
+        host: b"burke-mbp".to_vec(),
+        cwd: b"/Users/burke".to_vec(),
+        exe: b"/usr/sbin/nginx".to_vec(),
+        flags: FLAG_DELEGABLE,
+        stdin: StdinKind::Terminal,
+        argv: vec![b"nginx".to_vec(), b"-s".to_vec(), b"reload".to_vec()],
+        env: vec![EnvVar { origin: EnvOrigin::Default, name: b"TERM".to_vec(), value: b"xterm".to_vec() }],
+        ancestry: vec![Ancestor { pid: 4242, name: b"zsh".to_vec() }],
+    }
+}
+
+/// The watch section: a delegation, a watch's signatures, and the rule for
+/// what a watch may approve, case by case.
+fn delegation_vectors(phone: &SigningKey, pairing_id: [u8; 16]) -> Option<Value> {
+    type Change = fn(&mut Request);
+    let watch = SigningKey::from_slice(&[0x04; 32]).ok()?;
+    let (watch_kem_private, watch_kem_pub) = envelope::derive(&[0x05; 32]).ok()?;
+    let delegation = Delegation {
+        pairing_id,
+        sign_pub: public_of(&watch)?,
+        kem_pub: watch_kem_pub,
+        not_after: 1_802_776_000,
+        name: "Burke\u{2019}s Apple Watch".as_bytes().to_vec(),
+    };
+    let message = delegation.message().ok()?;
+    let signed = SignedDelegation { delegation: delegation.clone(), phone_sig: sign(phone, &message) };
+
+    let base = simple_request(pairing_id);
+    let bytes = base.encode().ok()?;
+    let digest = sigs::request_digest(&bytes);
+    let cases: [(&str, Change); 14] = [
+        ("an ordinary command", |_| {}),
+        ("no terminal attached", |r| r.stdin = StdinKind::Null),
+        ("a program that can be replaced without root", |r| r.flags |= FLAG_EXE_WRITABLE),
+        ("input arriving on a pipe", |r| r.stdin = StdinKind::Pipe),
+        ("a variable the caller named", |r| {
+            r.env.push(EnvVar { origin: EnvOrigin::Explicit, name: b"DEBUG".to_vec(), value: b"1".to_vec() });
+        }),
+        ("a control character", |r| r.argv.push(b"a\x1b[2Kb".to_vec())),
+        ("an invisible character", |r| r.argv.push("a\u{200b}b".as_bytes().to_vec())),
+        ("right-to-left text", |r| r.argv.push("/a/\u{5d0}/1".as_bytes().to_vec())),
+        ("bytes that are not text", |r| r.argv.push(vec![0xff, 0xfe])),
+        ("an empty argument", |r| r.argv.push(Vec::new())),
+        ("an accented program path", |r| r.exe = "/opt/caf\u{e9}/bin/x".as_bytes().to_vec()),
+        ("as many arguments as allowed", |r| r.argv = vec![b"a".to_vec(); delegation::MAX_SIMPLE_ARGS]),
+        ("one argument too many", |r| r.argv = vec![b"a".to_vec(); delegation::MAX_SIMPLE_ARGS + 1]),
+        ("arguments one byte too long", |r| r.argv = vec![vec![b'a'; delegation::MAX_SIMPLE_ARG_BYTES], b"b".to_vec()]),
+    ];
+    let mut simple = Vec::new();
+    for (what, change) in cases {
+        let mut request = simple_request(pairing_id);
+        change(&mut request);
+        simple.push(json!({
+            "what": what,
+            "request_hex": hex_encode(&request.encode().ok()?),
+            "simple_enough": simple_enough(&request),
+        }));
+    }
+    // The host's mark and the rule are separate: a watch needs both.
+    let mut unmarked = simple_request(pairing_id);
+    unmarked.flags = 0;
+
+    Some(json!({
+        "comment": "a watch the phone has authorised: see crates/proto/src/delegation.rs",
+        "watch_sign_pub_b64": b64_encode(&delegation.sign_pub),
+        "watch_kem_private_hex": hex_encode(&watch_kem_private),
+        "watch_kem_pub_b64": b64_encode(&delegation.kem_pub),
+        "not_after": delegation.not_after,
+        "name": std::str::from_utf8(&delegation.name).ok()?,
+        "message_hex": hex_encode(&message),
+        "signed_hex": hex_encode(&signed.encode().ok()?),
+        "phone_sig_b64": b64_encode(&signed.phone_sig),
+        "request_hex": hex_encode(&bytes),
+        "unmarked_request_hex": hex_encode(&unmarked.encode().ok()?),
+        "watch_approve_sig_b64": b64_encode(&sign(&watch, &sigs::approve_msg(&digest))),
+        "watch_deny_sig_b64": b64_encode(&sign(&watch, &sigs::deny_msg(&digest, b"not now"))),
+        "watch_deny_reason": "not now",
+        "limits": {
+            "max_args": delegation::MAX_SIMPLE_ARGS,
+            "max_arg_bytes": delegation::MAX_SIMPLE_ARG_BYTES,
+            "max_path_len": delegation::MAX_SIMPLE_PATH_LEN,
+            "max_name_len": delegation::MAX_DELEGATE_NAME_LEN,
+            "max_delegation_secs": delegation::MAX_DELEGATION_SECS,
+        },
+        "simple_enough": simple,
+    }))
 }
 
 #[expect(clippy::too_many_lines, reason = "one flat table of vectors reads better than scattered pieces")]
@@ -240,6 +339,7 @@ fn build() -> Option<Value> {
             "envelope_b64": b64_encode(&sealed),
             "plaintext_hex": hex_encode(&plaintext),
         },
+        "delegation": delegation_vectors(&phone, offer.pairing_id)?,
         "escape": escapes.iter().map(|input| json!([hex_encode(input), escape(input)])).collect::<Vec<_>>(),
         "env_risk": { "risky": risky, "safe": safe },
     }))

@@ -289,6 +289,9 @@ struct PairingDetailView: View {
                     }
                 }
                 .font(.footnote)
+                if pairing.active {
+                    WatchSection(pairingID: pairingID, hostName: pairing.hostName)
+                }
                 Section {
                     Button("Unpair this computer", role: .destructive) { confirmingUnpair = true }
                 } footer: {
@@ -308,5 +311,58 @@ struct PairingDetailView: View {
         } else {
             ContentUnavailableView("No longer paired", systemImage: "desktopcomputer.trianglebadge.exclamationmark")
         }
+    }
+}
+
+/// The pairing's Apple Watch: whether one may answer, until when, and the
+/// controls to allow, renew or stop it.
+struct WatchSection: View {
+    @Environment(AppModel.self) private var model
+    let pairingID: Data
+    let hostName: String
+
+    private var isWorking: Bool { model.watchSetup[pairingID] == .working }
+
+    var body: some View {
+        Section {
+            if let grant = model.watchGrant(pairingID) {
+                LabeledContent(grant.name) {
+                    Text(expiry(grant)).foregroundStyle(isExpired(grant) ? Theme.risk : .secondary)
+                }
+                Button("Renew") { Task { await model.allowWatch(pairingID) } }.disabled(isWorking)
+                Button("Stop using Apple Watch", role: .destructive) { Task { await model.removeWatch(pairingID) } }
+                    .disabled(isWorking)
+            } else {
+                Button {
+                    Task { await model.allowWatch(pairingID) }
+                } label: {
+                    Label("Allow Apple Watch", systemImage: "applewatch")
+                }
+                .disabled(isWorking)
+            }
+            if isWorking {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Asking your Apple Watch…").foregroundStyle(.secondary)
+                }
+            }
+            if case .failed(let why) = model.watchSetup[pairingID] {
+                Text(why).font(.footnote).foregroundStyle(Theme.risk)
+            }
+        } header: {
+            Text("Apple Watch")
+        } footer: {
+            Text("A watch cannot check your face: it knows only that it is unlocked and still on your wrist. So it may approve only requests that \(hostName) marks as simple, and may deny any. It counts for nothing until that computer\u{2019}s administrator runs sudo isudo-admin watch on. Open isudo on the watch before allowing it.")
+        }
+    }
+
+    private func isExpired(_ grant: WatchGrant) -> Bool {
+        Date().timeIntervalSince1970 > Double(grant.notAfter)
+    }
+
+    private func expiry(_ grant: WatchGrant) -> String {
+        let date = Date(timeIntervalSince1970: Double(grant.notAfter))
+        let day = date.formatted(date: .abbreviated, time: .omitted)
+        return isExpired(grant) ? "ran out \(day)" : "until \(day)"
     }
 }

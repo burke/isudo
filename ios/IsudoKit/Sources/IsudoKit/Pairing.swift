@@ -17,6 +17,8 @@ public enum Refusal: Error, Equatable, Sendable {
     case expired
     /// This request was already shown.
     case alreadySeen
+    /// A watch only: the phone's authorisation of it has run out.
+    case authorisationExpired
 }
 
 public enum PairingError: Error, Equatable, Sendable {
@@ -295,29 +297,8 @@ public struct Pairing: Equatable, Sendable, Codable, Identifiable {
         _ delivered: API.PendingRequest, now: UInt64, kemPrivate: P256.KeyAgreement.PrivateKey
     ) throws(Refusal) -> Card {
         guard active else { throw .notActive }
-        guard let sealed = try? Codec.b64Decode(delivered.envelope),
-              let (hostSignature, bytes) = try? Crypto.openEnvelope(sealed, kemPrivate: kemPrivate, pairingID: pairingID)
-        else { throw .undecryptable }
-        guard Crypto.verify(publicKey: hostPub, message: Messages.hostRequest(bytes), signature: hostSignature) else {
-            throw .notFromHost
-        }
-        guard let request = try? Request.decode(bytes) else { throw .malformed }
-        let requestID = Messages.requestID(bytes)
-        guard request.pairingID == pairingID,
-              (try? Codec.hexDecode(delivered.requestID, count: Proto.requestIDLength)) == requestID
-        else { throw .malformed }
-        let (sum, overflow) = request.issuedAt.addingReportingOverflow(UInt64(request.ttlSecs))
-        let expiresAt = overflow ? UInt64.max : sum
-        let (limit, limitOverflow) = expiresAt.addingReportingOverflow(Self.clockSkewSecs)
-        guard now <= (limitOverflow ? UInt64.max : limit) else { throw .expired }
-        guard seen.insert(requestID).inserted else { throw .alreadySeen }
-        while seen.count > Self.maxSeen {
-            // Forget the smallest id, as the reference implementation does.
-            if let smallest = seen.min(by: { $0.lexicographicallyPrecedes($1) }) {
-                seen.remove(smallest)
-            }
-        }
-        return Card(digest: Messages.requestDigest(bytes), requestID: requestID, expiresAt: expiresAt, request: request)
+        return try RequestOpener(pairingID: pairingID, hostPub: hostPub)
+            .open(delivered, now: now, kemPrivate: kemPrivate, seen: &seen)
     }
 
     /// Signs an approval of a card. This is the step behind Face ID.

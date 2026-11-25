@@ -109,14 +109,18 @@ mod tests {
 
     #[test]
     fn without_faults_everything_approved_runs() {
-        let mut ran = 0;
+        let (mut ran, mut ran_by_watch) = (0, 0);
         for seed in 0..seeds() {
             let stats = run(seed, 300, false).unwrap_or_else(|v| panic!("seed {seed}: {v}"));
             assert_eq!(stats.forged_verdicts, 0, "seed {seed}: nothing forges in a fault-free run");
             assert_eq!(stats.phone_refusals, 0, "seed {seed}: nothing is refused in a fault-free run");
+            assert_eq!(stats.watch_refused, 0, "seed {seed}: an honest watch is never refused");
             ran += stats.executed;
+            ran_by_watch += stats.watch_ran;
         }
         assert!(ran > 0, "the fault-free simulation never ran a command");
+        assert!(ran_by_watch > 0, "nothing ever ran on the watch's approval");
+        assert!(ran_by_watch < ran, "nothing ever ran on the phone's approval");
     }
 
     #[test]
@@ -128,6 +132,9 @@ mod tests {
             totals.forged_verdicts += stats.forged_verdicts;
             totals.phone_refusals += stats.phone_refusals;
             totals.attacks += stats.attacks;
+            totals.watch_ran += stats.watch_ran;
+            totals.watch_refused += stats.watch_refused;
+            totals.watch_shown += stats.watch_shown;
         }
         // The run is only evidence if the attacker actually did things, the
         // defences actually fired, and legitimate work still got through.
@@ -135,5 +142,8 @@ mod tests {
         assert!(totals.forged_verdicts > 0, "no forgery was ever detected by the host");
         assert!(totals.phone_refusals > 0, "the phone never refused anything");
         assert!(totals.executed > 0, "nothing legitimate ran under attack");
+        assert!(totals.watch_shown > 0, "the watch never showed anything");
+        assert!(totals.watch_ran > 0, "nothing ran on a watch's approval under attack");
+        assert!(totals.watch_refused > 0, "the host never had to refuse a watch");
     }
 }

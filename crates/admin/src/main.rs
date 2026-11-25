@@ -24,11 +24,14 @@ const USAGE: &str = "\
 usage: sudo isudo-admin pair --relay URL [--name NAME] [--timeout SECONDS]
                              [--secure-path DIRS] [--registration-token TOKEN]
        sudo isudo-admin unpair
+       sudo isudo-admin watch on|off
        sudo isudo-admin status
             isudo-admin check
 
   pair     show a QR code for the isudo phone app, then pin that phone's key
   unpair   forget the paired phone
+  watch    allow, or stop allowing, a watch that the paired phone authorises
+           to answer: it may approve simple requests and deny any (default off)
   status   show which phone is paired
   check    verify that the installed programs cannot be replaced without root
 
@@ -121,6 +124,11 @@ fn status(options: &Options) -> Result<(), String> {
             say(&format!("Relay:        {}", escape(pairing.relay_url.as_bytes())));
             say(&format!("Pairing id:   {}", hex_encode(&pairing.id)));
             say(&format!("Timeout:      {}s", pairing.timeout_secs));
+            say(if pairing.watch {
+                "Watch:        allowed (a watch the phone authorises may approve simple requests)"
+            } else {
+                "Watch:        not allowed (only the phone can answer)"
+            });
         }
     }
     Ok(())
@@ -152,6 +160,34 @@ fn unpair(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// Turns the watch on or off in the pairing file.
+///
+/// This is root's decision, not the phone's. A watch cannot check a face,
+/// so its approval says less than the phone's about who gave it; whether
+/// that is acceptable on this machine is for whoever administers it.
+fn watch(setting: &str, options: &Options) -> Result<(), String> {
+    let allow = match setting {
+        "on" => true,
+        "off" => false,
+        _ => return Err(USAGE.to_owned()),
+    };
+    options.require_root()?;
+    let path = options.config_path();
+    let Some(mut pairing) = read_pairing(&path)? else {
+        return Err("no phone is paired with this machine; pair one first".to_owned());
+    };
+    pairing.watch = allow;
+    pair::write_pairing(&path, &config::render(&pairing)?)?;
+    let phone = escape(pairing.phone_name.as_bytes());
+    if allow {
+        say(&format!("A watch that {phone} authorises may now approve simple requests, and deny any request."));
+        say("Authorise one in the isudo app on the phone. Everything else still needs the phone.");
+    } else {
+        say(&format!("Only {phone} can answer now. A watch's answer is refused from this moment."));
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or_else(|| USAGE.to_owned())?;
@@ -159,7 +195,14 @@ fn run() -> Result<(), String> {
         say(USAGE);
         return Ok(());
     }
+    // `watch` takes one word before any options.
+    let setting = if command == "watch" { Some(args.next().ok_or_else(|| USAGE.to_owned())?) } else { None };
     let options = parse(args).map_err(|e| [e.as_str(), "\n", USAGE].concat())?;
+    match (command.as_str(), setting) {
+        ("watch", Some(setting)) => return watch(&setting, &options),
+        (_, Some(_)) => return Err(USAGE.to_owned()),
+        (_, None) => {}
+    }
     match command.as_str() {
         "pair" => pair::run(&options),
         "unpair" => unpair(&options),

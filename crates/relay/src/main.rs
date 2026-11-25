@@ -38,10 +38,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use isudo_proto::api::{
-    Ack, Answer, Claim, ClaimView, Confirm, CreatePairing, DeviceUpdate, ErrorBody, PairingStatus, PendingList, Revoke,
-    SubmitRequest,
+    Ack, AddDelegate, Answer, Claim, ClaimView, Confirm, CreatePairing, DelegateList, DeviceUpdate, ErrorBody,
+    PairingStatus, PendingList, RemoveDelegate, Revoke, SubmitRequest,
 };
-use isudo_relay_core::{Limits, Push, Reject, Relay};
+use isudo_relay_core::{Limits, Push, Reject, Relay, Settled};
 use serde::Deserialize;
 use tokio::sync::Notify;
 
@@ -99,6 +99,20 @@ impl App {
         if let Err(error) = written {
             log(&format!("cannot save state to {}: {error}", path.display()));
         }
+    }
+
+    /// Tells the phone, in the background, that a request was answered.
+    fn settled(self: &Arc<Self>, settled: Settled) {
+        if self.apns.is_none() {
+            return;
+        }
+        let app = Arc::clone(self);
+        drop(tokio::spawn(async move {
+            let Some(apns) = &app.apns else { return };
+            if let Err(error) = apns.send_settled(&settled, now()).await {
+                log(&format!("notice that request {} was answered failed: {error}", settled.request_id));
+            }
+        }));
     }
 
     /// Sends a push in the background; the request does not wait for Apple.
@@ -206,6 +220,32 @@ async fn unpair(State(app): Shared, Path(pairing): Path<String>, headers: Header
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn add_delegate(
+    State(app): Shared,
+    Path(pairing): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<AddDelegate>,
+) -> Done {
+    app.step(|relay, _| relay.add_delegate(&pairing, bearer(&headers), &body))?;
+    app.persist().await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_delegate(
+    State(app): Shared,
+    Path(pairing): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<RemoveDelegate>,
+) -> Done {
+    app.step(|relay, _| relay.remove_delegate(&pairing, bearer(&headers), &body))?;
+    app.persist().await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delegations(State(app): Shared, Path(pairing): Path<String>) -> Result<Json<DelegateList>, ApiError> {
+    app.step(|relay, _| relay.delegations(&pairing)).map(Json)
+}
+
 async fn pending(
     State(app): Shared,
     Path(pairing): Path<String>,
@@ -222,8 +262,11 @@ async fn submit(State(app): Shared, Json(body): Json<SubmitRequest>) -> Done {
 }
 
 async fn answer(State(app): Shared, Path(request): Path<String>, headers: HeaderMap, Json(body): Json<Answer>) -> Done {
-    app.step(|relay, now| relay.answer(now, &request, bearer(&headers), body))?;
+    let settled = app.step(|relay, now| relay.answer(now, &request, bearer(&headers), body))?;
     app.answered.notify_waiters();
+    if let Some(settled) = settled {
+        app.settled(settled);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -268,6 +311,8 @@ fn router(app: Arc<App>) -> Router {
         .route("/v1/pairings/{pairing}/device", post(update_device))
         .route("/v1/pairings/{pairing}/revoke", post(revoke))
         .route("/v1/pairings/{pairing}/unpair", post(unpair))
+        .route("/v1/pairings/{pairing}/delegates", post(add_delegate).get(delegations))
+        .route("/v1/pairings/{pairing}/delegates/remove", post(remove_delegate))
         .route("/v1/pairings/{pairing}/requests", get(pending))
         .route("/v1/requests", post(submit))
         .route("/v1/requests/{request}/response", post(answer).get(poll_answer))

@@ -10,11 +10,11 @@
 #![forbid(unsafe_code)]
 
 use std::io::{Read as _, Write as _};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use isudo_client::envelope;
 use isudo_client::relay::{Relay, RelayError};
-use isudo_proto::api::SubmitRequest;
+use isudo_proto::api::{DelegateEnvelope, SubmitRequest};
 use isudo_proto::codec::{b64_encode, hex_encode};
 use isudo_proto::frame::{Failure, Job, Outcome};
 use isudo_proto::{sigs, MAX_REQUEST_LEN};
@@ -59,6 +59,7 @@ fn run() -> Result<Outcome, Failure> {
     let sealed = envelope::seal(&job.phone_kem_pub, &job.pairing_id, &job.host_sig, &job.request)
         .map_err(|_e| Failure::Internal)?;
     let request_id = hex_encode(&sigs::request_id(&job.request));
+    let delegate_envelopes = if job.delegates { seal_for_delegates(&relay, &job) } else { Vec::new() };
 
     relay
         .submit(&SubmitRequest {
@@ -67,6 +68,7 @@ fn run() -> Result<Outcome, Failure> {
             expires_at: job.expires_at,
             ticket_sig: b64_encode(&job.ticket_sig),
             envelope: b64_encode(&sealed),
+            delegate_envelopes,
         })
         .map_err(relay_failure)?;
 
@@ -88,6 +90,29 @@ fn run() -> Result<Outcome, Failure> {
             Err(_) => std::thread::sleep(RETRY_PAUSE.min(remaining)),
         }
     }
+}
+
+/// Seals the request to each delegate the phone has signed for, so that a
+/// watch can show it too.
+///
+/// Best effort: if the relay cannot say, or says nothing believable, the
+/// request still goes to the phone. What the relay returns is only a hint;
+/// a request is sealed to a key only if the pinned phone key signed for it.
+fn seal_for_delegates(relay: &Relay, job: &Job) -> Vec<DelegateEnvelope> {
+    let Ok(listed) = relay.delegations(&hex_encode(&job.pairing_id)) else { return Vec::new() };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(u64::MAX, |since| since.as_secs());
+    let mut sealed = Vec::new();
+    for encoded in listed.delegations.iter().take(isudo_client::MAX_DELEGATES) {
+        let Some(delegation) = isudo_client::verified_delegation(encoded, &job.pairing_id, &job.phone_sign_pub, now)
+        else {
+            continue;
+        };
+        if let Ok(envelope) = envelope::seal(&delegation.kem_pub, &job.pairing_id, &job.host_sig, &job.request) {
+            sealed
+                .push(DelegateEnvelope { delegate: b64_encode(&delegation.sign_pub), envelope: b64_encode(&envelope) });
+        }
+    }
+    sealed
 }
 
 #[cfg(test)]

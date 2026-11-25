@@ -117,6 +117,7 @@ mod tests {
             CTX_PAIR_CONFIRM,
             CTX_PAIR_REVOKE,
             CTX_ENVELOPE,
+            crate::delegation::CTX_DELEGATE,
         ];
         for (i, a) in all.iter().enumerate() {
             assert_eq!(a.last(), Some(&0));

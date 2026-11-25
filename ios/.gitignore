@@ -9,3 +9,4 @@ App/Isudo.entitlements
 # SwiftPM and Xcode working files.
 .swiftpm/
 xcuserdata/
+Watch/Info.plist

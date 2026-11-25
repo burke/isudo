@@ -20,6 +20,16 @@
   or denies; the phone signs the answer; the host acts only on a signature
   by the pinned key over this request.
 
+  The watch: the phone signs a delegation naming a key made on the person's
+  watch. The watch is shown the same requests, checked the same way. Its
+  signature, presented with the delegation, is an answer too, within limits
+  the host sets: the host's root-owned configuration must allow a watch at
+  all, and a watch may approve only a request the host marked as eligible,
+  in the request it signed (it may deny any). Whether a watch is allowed,
+  and whether each command is simple enough to be eligible, are both left
+  to the attacker to choose, so every combination is covered. The watch's
+  private key may be handed to the attacker: a stolen watch.
+
   The attacker
   ------------
   Controls the network and the relay (everything is sent on the public
@@ -76,7 +86,9 @@
     the attacker described above.
 
   Not modelled: confidentiality of requests (the HPKE envelope), the phone's
-  second key, clocks and expiry, and everything about what a command does.
+  and watch's second keys, clocks and expiry (so a delegation here never
+  runs out), the link between a phone and its own watch (they are one
+  process), and everything about what a command does.
 *)
 
 free c: channel.              (* network, relay, and every pairing code: the attacker's *)
@@ -96,7 +108,7 @@ fun commit(bitstring, pkey, bitstring): bitstring.   (* (pairing, host key, host
 fun shortcode(bitstring, bitstring): bitstring.      (* (host nonce, phone nonce): binds nothing else *)
 
 (* Distinct context tags, as in crates/proto/src/sigs.rs. *)
-const tagAck, tagConfirm, tagRequest, tagApprove, tagDeny: bitstring.
+const tagAck, tagConfirm, tagRequest, tagApprove, tagDeny, tagDelegate, tagByWatch: bitstring.
 
 event HonestHost(pkey).                        (* this key belongs to a real host *)
 event PhoneScanned(bitstring, pkey, pkey).     (* a phone read a pairing code naming (pairing, host key) and made this key *)
@@ -106,12 +118,19 @@ event Pinned(bitstring, pkey, pkey).           (* the host wrote this phone key 
 event PhoneActive(bitstring, pkey, pkey).
 event HostKeyLeaked(pkey).
 
-event Asked(bitstring, bitstring, bitstring).            (* pairing, nonce, command *)
+event Asked(bitstring, bitstring, bitstring, bool).       (* pairing, nonce, command, eligible for a watch *)
 event Shown(bitstring, pkey, bitstring, bitstring).      (* pairing, host key as the phone knows it, nonce, command *)
 event Approved(bitstring, bitstring, bitstring).
 event Denied(bitstring, bitstring, bitstring, bitstring).(* ..., reason *)
-event Exec(bitstring, bitstring, bitstring).
+event Exec(bitstring, bitstring, bitstring, bool).
 event DenialShown(bitstring, bitstring, bitstring, bitstring).
+
+event Delegated(bitstring, pkey).                        (* the phone signed for this watch key, for this pairing *)
+event WatchLeaked(bitstring).                            (* the watch's private key was handed to the attacker *)
+event WatchShown(bitstring, pkey, bitstring, bitstring).
+event WatchApproved(bitstring, bitstring, bitstring).
+event WatchDenied(bitstring, bitstring, bitstring, bitstring).
+event ExecByWatch(bitstring, bitstring, bitstring, pkey).(* ran on the signature of this watch key *)
 
 (* ---- Pairing ---------------------------------------------------------- *)
 
@@ -134,39 +153,76 @@ query p: bitstring, kh: pkey, k: pkey;
 
 (* ---- Approval --------------------------------------------------------- *)
 
-(* 4. A command runs only if the phone approved exactly that request. *)
-query p: bitstring, n: bitstring, m: bitstring; event(Exec(p, n, m)) ==> event(Approved(p, n, m)).
+(* 4. A command runs only if the phone approved exactly that request, or
+      the host had marked the request eligible and the watch approved exactly
+      that request. A stolen watch gains what the watch could do, and no
+      more: nothing the host did not mark. (The host marks nothing unless
+      its configuration allows a watch.) *)
+query p: bitstring, n: bitstring, m: bitstring, e: bool;
+  event(Exec(p, n, m, e)) ==>
+    event(Approved(p, n, m)) || (e = true && (event(WatchApproved(p, n, m)) || event(WatchLeaked(p)))).
 
 (* 5. Each run corresponds to its own, distinct ask: no replay, no reuse. *)
-query p: bitstring, n: bitstring, m: bitstring; inj-event(Exec(p, n, m)) ==> inj-event(Asked(p, n, m)).
+query p: bitstring, n: bitstring, m: bitstring, e: bool;
+  inj-event(Exec(p, n, m, e)) ==> inj-event(Asked(p, n, m, e)).
 
 (* 6. A phone paired with an honest host shows, in that host's name, only
-      requests that host made (unless the host's key leaked). *)
-query p: bitstring, kh: pkey, n: bitstring, m: bitstring;
-  event(Shown(p, kh, n, m)) && event(HonestHost(kh)) ==> event(Asked(p, n, m)) || event(HostKeyLeaked(kh)).
+      requests that host made (unless the host's key leaked). So does the
+      phone's watch. *)
+query p: bitstring, kh: pkey, n: bitstring, m: bitstring, e: bool;
+  event(Shown(p, kh, n, m)) && event(HonestHost(kh)) ==> event(Asked(p, n, m, e)) || event(HostKeyLeaked(kh)).
+query p: bitstring, kh: pkey, n: bitstring, m: bitstring, e: bool;
+  event(WatchShown(p, kh, n, m)) && event(HonestHost(kh)) ==> event(Asked(p, n, m, e)) || event(HostKeyLeaked(kh)).
 
-(* 7. A denial reason reaches the caller only as the phone signed it. *)
+(* 7. A denial reason reaches the caller only as the phone or the watch
+      signed it. (A stolen watch can say what it likes.) *)
 query p: bitstring, n: bitstring, m: bitstring, r: bitstring;
-  event(DenialShown(p, n, m, r)) ==> event(Denied(p, n, m, r)).
+  event(DenialShown(p, n, m, r)) ==>
+    event(Denied(p, n, m, r)) || event(WatchDenied(p, n, m, r)) || event(WatchLeaked(p)).
+
+(* 8. The host honours a watch's signature only for a key the paired phone
+      signed for, for this pairing. Nobody else can appoint a watch: not the
+      relay, not the watch itself, not someone holding the host's key. *)
+query p: bitstring, n: bitstring, m: bitstring, kw: pkey;
+  event(ExecByWatch(p, n, m, kw)) ==> event(Delegated(p, kw)).
 
 (* ---- Sanity: the protocol can actually complete ------------------------ *)
 (* These are expected to be reported FALSE, meaning the event is reachable. *)
-query p: bitstring, n: bitstring, m: bitstring; event(Exec(p, n, m)).
+query p: bitstring, n: bitstring, m: bitstring, e: bool; event(Exec(p, n, m, e)).
 query p: bitstring, n: bitstring, m: bitstring, r: bitstring; event(DenialShown(p, n, m, r)).
+query p: bitstring, n: bitstring, m: bitstring, kw: pkey; event(ExecByWatch(p, n, m, kw)).
 
 (* One `isudo command` invocation, after pairing. *)
-let HostAsk(pid: bitstring, skH: skey, pkP: pkey) =
-  in(c, cmd: bitstring);                       (* the caller chooses the command *)
+let HostAsk(pid: bitstring, skH: skey, pkP: pkey, watchOn: bool) =
+  in(c, (cmd: bitstring, simple: bool));       (* the caller chooses the command, and so whether it is simple *)
   new n: bitstring;                            (* the nonce lives only in this process *)
-  event Asked(pid, n, cmd);
-  out(c, ((pid, n, cmd), sign((tagRequest, pid, n, cmd), skH)));
+  let eligible = watchOn && simple in          (* decided by the host, and signed *)
+  let req = (pid, n, cmd, eligible) in
+  event Asked(pid, n, cmd, eligible);
+  out(c, (req, sign((tagRequest, req), skH)));
   in(c, answer: bitstring) [precise];          (* whatever the helper hands back, once *)
-  let (=tagApprove, =h((pid, n, cmd))) = checksign(answer, pkP) in
-    event Exec(pid, n, cmd)
-  else
-    let (reason: bitstring, sig: bitstring) = answer in
-    let (=tagDeny, =h((pid, n, cmd)), =reason) = checksign(sig, pkP) in
-    event DenialShown(pid, n, cmd, reason).
+  let (=tagApprove, =h(req)) = checksign(answer, pkP) in
+    event Exec(pid, n, cmd, eligible)
+  else let (reason: bitstring, sig: bitstring) = answer in (
+    let (=tagDeny, =h(req), =reason) = checksign(sig, pkP) in
+    event DenialShown(pid, n, cmd, reason)
+  )
+  else let (=tagByWatch, cert: bitstring, wsig: bitstring) = answer in (
+    (* An approval by a watch. The chain starts at the pinned phone key. *)
+    if watchOn = true then
+    let (=tagDelegate, =pid, pkW: pkey) = checksign(cert, pkP) in
+    let (=tagApprove, =h(req)) = checksign(wsig, pkW) in
+    if eligible = true then
+    event ExecByWatch(pid, n, cmd, pkW);
+    event Exec(pid, n, cmd, eligible)
+  )
+  else let (=tagByWatch, cert: bitstring, reason: bitstring, wsig: bitstring) = answer in (
+    (* A denial by a watch. A watch may deny anything. *)
+    if watchOn = true then
+    let (=tagDelegate, =pid, pkW: pkey) = checksign(cert, pkP) in
+    let (=tagDeny, =h(req), =reason) = checksign(wsig, pkW) in
+    event DenialShown(pid, n, cmd, reason)
+  ).
 
 (* `isudo-admin pair`, then any number of invocations. *)
 let Host() =
@@ -185,23 +241,55 @@ let Host() =
   if typed = shortcode(hostNonce, phoneNonce) then
   event Pinned(pid, pkH, pkP);
   out(c, sign((tagConfirm, pid, pkP), skH));
-  ( !HostAsk(pid, skH, pkP) )
+  in(c, watchOn: bool);                          (* whether root has allowed a watch: either way *)
+  ( !HostAsk(pid, skH, pkP, watchOn) )
   | ( event HostKeyLeaked(pkH); out(c, skH) ).
 
 (* The phone looking at one delivered request. *)
 let PhoneAnswer(pid: bitstring, pkH: pkey, skP: skey) =
-  in(c, ((=pid, n: bitstring, cmd: bitstring), sig: bitstring));
-  let (=tagRequest, =pid, =n, =cmd) = checksign(sig, pkH) in
+  in(c, ((=pid, n: bitstring, cmd: bitstring, eligible: bool), sig: bitstring));
+  let req = (pid, n, cmd, eligible) in
+  let (=tagRequest, =req) = checksign(sig, pkH) in
   event Shown(pid, pkH, n, cmd);
   in(c, approves: bool);                       (* the person may do either *)
   if approves then (
     event Approved(pid, n, cmd);
-    out(c, sign((tagApprove, h((pid, n, cmd))), skP))
+    out(c, sign((tagApprove, h(req)), skP))
   ) else (
     new reason: bitstring;
     event Denied(pid, n, cmd, reason);
-    out(c, (reason, sign((tagDeny, h((pid, n, cmd)), reason), skP)))
+    out(c, (reason, sign((tagDeny, h(req), reason), skP)))
   ).
+
+(* The watch looking at one delivered request. The same checks; a narrower
+   choice: it approves only what the host marked as eligible. *)
+let WatchAnswer(pid: bitstring, pkH: pkey, skW: skey, cert: bitstring) =
+  in(c, ((=pid, n: bitstring, cmd: bitstring, eligible: bool), sig: bitstring));
+  let req = (pid, n, cmd, eligible) in
+  let (=tagRequest, =req) = checksign(sig, pkH) in
+  event WatchShown(pid, pkH, n, cmd);
+  in(c, approves: bool);
+  if approves then (
+    if eligible = true then
+    event WatchApproved(pid, n, cmd);
+    out(c, (tagByWatch, cert, sign((tagApprove, h(req)), skW)))
+  ) else (
+    new reason: bitstring;
+    event WatchDenied(pid, n, cmd, reason);
+    out(c, (tagByWatch, cert, reason, sign((tagDeny, h(req), reason), skW)))
+  ).
+
+(* The person's watch. Its key is made on the watch; the phone signs for it.
+   The phone and its own watch talk over a link the attacker is not on, so
+   here they are one process. The delegation itself is public. *)
+let Watch(pid: bitstring, pkH: pkey, skP: skey) =
+  new skW: skey;
+  let pkW = pk(skW) in
+  event Delegated(pid, pkW);
+  let cert = sign((tagDelegate, pid, pkW), skP) in
+  out(c, cert);
+  ( !WatchAnswer(pid, pkH, skW, cert) )
+  | ( event WatchLeaked(pid); out(c, skW) ).
 
 (* The person's phone: reads a pairing code, pairs, then answers requests. *)
 let Phone() =
@@ -221,7 +309,7 @@ let Phone() =
   in(c, confirmation: bitstring);
   let (=tagConfirm, =pid, =pkP) = checksign(confirmation, pkH) in
   event PhoneActive(pid, pkH, pkP);
-  !PhoneAnswer(pid, pkH, skP).
+  ( !PhoneAnswer(pid, pkH, skP) ) | Watch(pid, pkH, skP).
 
 process
     ( !Host() )

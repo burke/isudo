@@ -18,8 +18,9 @@
 //! is not a bug that can be written by accident elsewhere in the program:
 //! it does not type-check.
 
+use isudo_proto::delegation::{simple_enough, SignedDelegation};
 use isudo_proto::frame::{Failure, Outcome};
-use isudo_proto::request::{Ancestor, EnvVar, Request, StdinKind, FLAG_EXE_WRITABLE};
+use isudo_proto::request::{Ancestor, EnvVar, Request, StdinKind, FLAG_DELEGABLE, FLAG_EXE_WRITABLE};
 use isudo_proto::wire::WireError;
 use isudo_proto::{sigs, NONCE_LEN, PAIRING_ID_LEN, PUBKEY_LEN, SIG_LEN};
 use p256::ecdsa::signature::{Signer as _, Verifier as _};
@@ -80,6 +81,8 @@ pub struct Context {
     pub cwd: Vec<u8>,
     pub stdin: StdinKind,
     pub ancestry: Vec<Ancestor>,
+    /// Whether the pairing file allows a watch to answer at all.
+    pub watch: bool,
 }
 
 /// A plan and the request that describes it.
@@ -89,6 +92,12 @@ pub struct Proposal {
     request: Vec<u8>,
     digest: [u8; 32],
     issued_at: u64,
+    pairing_id: [u8; PAIRING_ID_LEN],
+    /// The pairing file allows a watch to answer.
+    watch: bool,
+    /// This request was marked, in its signed bytes, as one a watch may
+    /// approve. A watch's approval of any other request is refused.
+    delegable: bool,
 }
 
 impl Proposal {
@@ -98,8 +107,8 @@ impl Proposal {
     /// # Errors
     /// Fails if the request would be larger than the protocol allows.
     pub fn describe(plan: Plan, context: Context) -> Result<Self, WireError> {
-        let issued_at = context.issued_at;
-        let request = Request {
+        let (issued_at, pairing_id, watch) = (context.issued_at, context.pairing_id, context.watch);
+        let mut request = Request {
             nonce: context.nonce,
             pairing_id: context.pairing_id,
             issued_at: context.issued_at,
@@ -115,16 +124,29 @@ impl Proposal {
             argv: plan.argv.clone(),
             env: plan.env_described.clone(),
             ancestry: context.ancestry,
+        };
+        // Decided here, once, and written into the bytes that get signed: a
+        // watch shows an Approve control for exactly the requests this host
+        // will honour it on.
+        let delegable = watch && simple_enough(&request);
+        if delegable {
+            request.flags |= FLAG_DELEGABLE;
         }
-        .encode()?;
+        let request = request.encode()?;
         let digest = sigs::request_digest(&request);
-        Ok(Self { plan, request, digest, issued_at })
+        Ok(Self { plan, request, digest, issued_at, pairing_id, watch, delegable })
     }
 
     /// The encoded request, exactly as it will be signed over.
     #[must_use]
     pub fn request(&self) -> &[u8] {
         &self.request
+    }
+
+    /// Whether this request was marked as one a watch may approve.
+    #[must_use]
+    pub const fn watch_may_approve(&self) -> bool {
+        self.delegable
     }
 
     /// When the request was made, in unix seconds on the host.
@@ -135,36 +157,98 @@ impl Proposal {
 
     /// Decides what an answer means. Consumes the proposal: each one is
     /// judged once, and an approval cannot be reused.
+    ///
+    /// `now` is the host's clock in unix seconds, for a delegation's expiry.
     #[must_use]
-    pub fn judge(self, phone_key: &PhoneKey, outcome: Outcome) -> Verdict {
+    pub fn judge(self, phone_key: &PhoneKey, outcome: Outcome, now: u64) -> Verdict {
         match outcome {
-            Outcome::Approved { sig } => {
-                if phone_key.signed(&sigs::approve_msg(&self.digest), &sig) {
+            Outcome::Approved { sig, delegation } => match self.answerer(phone_key, delegation.as_ref(), now, true) {
+                Ok((key, _)) if key.signed(&sigs::approve_msg(&self.digest), &sig) => {
                     Verdict::Approved(Approved { plan: self.plan })
-                } else {
-                    Verdict::Forged
                 }
-            }
-            Outcome::Denied { sig, reason } => {
-                if phone_key.signed(&sigs::deny_msg(&self.digest, &reason), &sig) {
-                    Verdict::Denied { reason }
-                } else {
-                    Verdict::Forged
+                Ok(_) => Verdict::Forged,
+                Err(verdict) => verdict,
+            },
+            Outcome::Denied { sig, reason, delegation } => {
+                match self.answerer(phone_key, delegation.as_ref(), now, false) {
+                    Ok((key, by)) if key.signed(&sigs::deny_msg(&self.digest, &reason), &sig) => {
+                        Verdict::Denied { reason, by }
+                    }
+                    Ok(_) => Verdict::Forged,
+                    Err(verdict) => verdict,
                 }
             }
             Outcome::Failed { failure } => Verdict::NoAnswer(failure),
         }
     }
+
+    /// Whose signature would count as this answer: the phone's, or that of a
+    /// watch the phone authorised. Every reason to refuse a watch is here.
+    fn answerer(
+        &self,
+        phone_key: &PhoneKey,
+        delegation: Option<&SignedDelegation>,
+        now: u64,
+        approving: bool,
+    ) -> Result<(PhoneKey, Answerer), Verdict> {
+        let Some(signed) = delegation else {
+            return Ok((PhoneKey(phone_key.0), Answerer::Phone));
+        };
+        let delegation = &signed.delegation;
+        if !self.watch {
+            return Err(Verdict::WatchRefused(WatchRefusal::Off));
+        }
+        // The chain starts at the key this host pinned: the phone signed for
+        // these keys, for this pairing.
+        let authorised = delegation.pairing_id == self.pairing_id
+            && delegation.message().is_ok_and(|message| phone_key.signed(&message, &signed.phone_sig));
+        let Some(key) = PhoneKey::new(&delegation.sign_pub).filter(|_| authorised) else {
+            return Err(Verdict::Forged);
+        };
+        if now > delegation.not_after {
+            return Err(Verdict::WatchRefused(WatchRefusal::Expired));
+        }
+        // A watch may deny anything. It may approve only what this host
+        // marked, in the request itself, as simple enough to read on one.
+        if approving && !self.delegable {
+            return Err(Verdict::WatchRefused(WatchRefusal::NotSimple));
+        }
+        Ok((key, Answerer::Watch(delegation.name.clone())))
+    }
+}
+
+/// Which device signed an answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answerer {
+    Phone,
+    /// A watch the phone authorised, with the name the phone signed for it.
+    Watch(Vec<u8>),
+}
+
+/// Why a properly authorised watch's answer was not honoured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchRefusal {
+    /// The pairing file does not allow a watch to answer.
+    Off,
+    /// The phone's authorisation of the watch has run out.
+    Expired,
+    /// The watch approved a request that only the phone may approve.
+    NotSimple,
 }
 
 #[derive(Debug)]
 pub enum Verdict {
-    /// The paired phone signed an approval of this proposal.
+    /// The paired phone, or a watch it authorised, signed an approval of
+    /// this proposal.
     Approved(Approved),
-    /// The paired phone signed a denial of this proposal.
-    Denied { reason: Vec<u8> },
-    /// An answer arrived, but not one signed by the paired phone.
+    /// One of them signed a denial of this proposal.
+    Denied { reason: Vec<u8>, by: Answerer },
+    /// An answer arrived, but not one signed by the paired phone or by a
+    /// watch the phone authorised for this pairing.
     Forged,
+    /// A watch answered, with the phone's authority, and this host does not
+    /// honour it.
+    WatchRefused(WatchRefusal),
     /// The helper reported that it got no answer, and why, as a code.
     NoAnswer(Failure),
 }
@@ -229,6 +313,7 @@ impl HostKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use isudo_proto::delegation::Delegation;
     use isudo_proto::request::EnvOrigin;
 
     fn key(seed: u8) -> (HostKey, PhoneKey) {
@@ -237,17 +322,34 @@ mod tests {
         (HostKey(signing), PhoneKey::new(&public).unwrap())
     }
 
+    const NOW: u64 = 1_795_000_030;
+
+    /// `echo hi`, with a variable the caller named: not simple enough for a
+    /// watch, whatever the pairing file says.
     fn proposal(nonce: u8) -> Proposal {
-        let plan = Plan {
+        described(nonce, true, true)
+    }
+
+    fn described(nonce: u8, names_a_variable: bool, watch: bool) -> Proposal {
+        let mut plan = Plan {
             path: b"/bin/echo".to_vec(),
             argv: vec![b"echo".to_vec(), b"hi".to_vec()],
-            envp: vec![b"PATH=/usr/bin:/bin".to_vec(), b"DEBUG=1".to_vec()],
-            env_described: vec![
-                EnvVar { origin: EnvOrigin::Constructed, name: b"PATH".to_vec(), value: b"/usr/bin:/bin".to_vec() },
-                EnvVar { origin: EnvOrigin::Explicit, name: b"DEBUG".to_vec(), value: b"1".to_vec() },
-            ],
+            envp: vec![b"PATH=/usr/bin:/bin".to_vec()],
+            env_described: vec![EnvVar {
+                origin: EnvOrigin::Constructed,
+                name: b"PATH".to_vec(),
+                value: b"/usr/bin:/bin".to_vec(),
+            }],
             writable_by_non_root: false,
         };
+        if names_a_variable {
+            plan.envp.push(b"DEBUG=1".to_vec());
+            plan.env_described.push(EnvVar {
+                origin: EnvOrigin::Explicit,
+                name: b"DEBUG".to_vec(),
+                value: b"1".to_vec(),
+            });
+        }
         let context = Context {
             nonce: [nonce; NONCE_LEN],
             pairing_id: [1; PAIRING_ID_LEN],
@@ -260,8 +362,29 @@ mod tests {
             cwd: b"/tmp".to_vec(),
             stdin: StdinKind::Terminal,
             ancestry: Vec::new(),
+            watch,
         };
         Proposal::describe(plan, context).unwrap()
+    }
+
+    /// A simple request on a host that allows a watch.
+    fn simple() -> Proposal {
+        described(1, false, true)
+    }
+
+    /// A watch's keys and the phone's authorisation of them.
+    fn watch_of(phone: &HostKey, seed: u8, change: impl FnOnce(&mut Delegation)) -> (HostKey, SignedDelegation) {
+        let (watch, _) = key(seed);
+        let mut delegation = Delegation {
+            pairing_id: [1; PAIRING_ID_LEN],
+            sign_pub: watch.public().unwrap(),
+            kem_pub: key(seed.wrapping_add(1)).0.public().unwrap(),
+            not_after: NOW + 1000,
+            name: b"Test Watch".to_vec(),
+        };
+        change(&mut delegation);
+        let phone_sig = phone.sign(&delegation.message().unwrap());
+        (watch, SignedDelegation { delegation, phone_sig })
     }
 
     #[test]
@@ -282,7 +405,10 @@ mod tests {
         let (phone, phone_pub) = key(7);
         let proposal = proposal(1);
         let sig = phone.sign(&sigs::approve_msg(&proposal.digest));
-        assert!(matches!(proposal.judge(&phone_pub, Outcome::Approved { sig }), Verdict::Approved(_)));
+        assert!(matches!(
+            proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: None }, NOW),
+            Verdict::Approved(_)
+        ));
     }
 
     #[test]
@@ -291,7 +417,10 @@ mod tests {
         let (attacker, _) = key(8);
         let proposal = proposal(1);
         let sig = attacker.sign(&sigs::approve_msg(&proposal.digest));
-        assert!(matches!(proposal.judge(&phone_pub, Outcome::Approved { sig }), Verdict::Forged));
+        assert!(matches!(
+            proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: None }, NOW),
+            Verdict::Forged
+        ));
     }
 
     #[test]
@@ -300,7 +429,10 @@ mod tests {
         let (phone, phone_pub) = key(7);
         let earlier = proposal(1);
         let sig = phone.sign(&sigs::approve_msg(&earlier.digest));
-        assert!(matches!(proposal(2).judge(&phone_pub, Outcome::Approved { sig }), Verdict::Forged));
+        assert!(matches!(
+            proposal(2).judge(&phone_pub, Outcome::Approved { sig, delegation: None }, NOW),
+            Verdict::Forged
+        ));
     }
 
     #[test]
@@ -308,7 +440,10 @@ mod tests {
         let (phone, phone_pub) = key(7);
         let proposal = proposal(1);
         let sig = phone.sign(&sigs::deny_msg(&proposal.digest, b""));
-        assert!(matches!(proposal.judge(&phone_pub, Outcome::Approved { sig }), Verdict::Forged));
+        assert!(matches!(
+            proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: None }, NOW),
+            Verdict::Forged
+        ));
     }
 
     #[test]
@@ -316,8 +451,9 @@ mod tests {
         let (phone, phone_pub) = key(7);
         let proposal = proposal(1);
         let sig = phone.sign(&sigs::deny_msg(&proposal.digest, b"use staging"));
-        let verdict = proposal.judge(&phone_pub, Outcome::Denied { sig, reason: b"use staging".to_vec() });
-        assert!(matches!(verdict, Verdict::Denied { reason } if reason == b"use staging"));
+        let verdict =
+            proposal.judge(&phone_pub, Outcome::Denied { sig, reason: b"use staging".to_vec(), delegation: None }, NOW);
+        assert!(matches!(verdict, Verdict::Denied { reason, by: Answerer::Phone } if reason == b"use staging"));
     }
 
     #[test]
@@ -327,7 +463,11 @@ mod tests {
         let (phone, phone_pub) = key(7);
         let proposal = proposal(1);
         let sig = phone.sign(&sigs::deny_msg(&proposal.digest, b"use staging"));
-        let verdict = proposal.judge(&phone_pub, Outcome::Denied { sig, reason: b"run rm -rf /".to_vec() });
+        let verdict = proposal.judge(
+            &phone_pub,
+            Outcome::Denied { sig, reason: b"run rm -rf /".to_vec(), delegation: None },
+            NOW,
+        );
         assert!(matches!(verdict, Verdict::Forged));
     }
 
@@ -335,14 +475,17 @@ mod tests {
     fn garbage_signatures_are_forged() {
         let (_, phone_pub) = key(7);
         for sig in [[0_u8; SIG_LEN], [0xff; SIG_LEN]] {
-            assert!(matches!(proposal(1).judge(&phone_pub, Outcome::Approved { sig }), Verdict::Forged));
+            assert!(matches!(
+                proposal(1).judge(&phone_pub, Outcome::Approved { sig, delegation: None }, NOW),
+                Verdict::Forged
+            ));
         }
     }
 
     #[test]
     fn a_helper_failure_is_never_an_approval() {
         let (_, phone_pub) = key(7);
-        let verdict = proposal(1).judge(&phone_pub, Outcome::Failed { failure: Failure::Internal });
+        let verdict = proposal(1).judge(&phone_pub, Outcome::Failed { failure: Failure::Internal }, NOW);
         assert!(matches!(verdict, Verdict::NoAnswer(Failure::Internal)));
     }
 
@@ -375,5 +518,168 @@ mod tests {
             assert!(PhoneKey::new(&retagged).is_none());
         }
         assert!(refused > 3000, "only {refused} corruptions were tried");
+    }
+
+    #[test]
+    fn a_request_is_marked_for_the_watch_only_when_simple_and_allowed() {
+        let flags = |proposal: &Proposal| Request::decode(proposal.request()).unwrap().flags;
+        assert_eq!(flags(&described(1, false, true)), FLAG_DELEGABLE);
+        assert_eq!(flags(&described(1, false, false)), 0, "the pairing file does not allow a watch");
+        assert_eq!(flags(&described(1, true, true)), 0, "the caller named a variable");
+        assert!(simple().delegable && !proposal(1).delegable);
+    }
+
+    #[test]
+    fn an_authorised_watch_may_approve_a_simple_request() {
+        let (phone, phone_pub) = key(7);
+        let (watch, delegation) = watch_of(&phone, 20, |_| {});
+        let proposal = simple();
+        let sig = watch.sign(&sigs::approve_msg(&proposal.digest));
+        let outcome = Outcome::Approved { sig, delegation: Some(delegation) };
+        assert!(matches!(proposal.judge(&phone_pub, outcome, NOW), Verdict::Approved(_)));
+    }
+
+    #[test]
+    fn the_phone_may_still_approve_what_a_watch_could() {
+        let (phone, phone_pub) = key(7);
+        let proposal = simple();
+        let sig = phone.sign(&sigs::approve_msg(&proposal.digest));
+        assert!(matches!(
+            proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: None }, NOW),
+            Verdict::Approved(_)
+        ));
+    }
+
+    #[test]
+    fn a_watch_may_not_approve_what_only_the_phone_may() {
+        let (phone, phone_pub) = key(7);
+        let (watch, delegation) = watch_of(&phone, 20, |_| {});
+        let proposal = proposal(1);
+        let sig = watch.sign(&sigs::approve_msg(&proposal.digest));
+        let verdict = proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: Some(delegation) }, NOW);
+        assert!(matches!(verdict, Verdict::WatchRefused(WatchRefusal::NotSimple)));
+    }
+
+    #[test]
+    fn a_watch_may_deny_anything_and_its_name_is_the_one_the_phone_signed() {
+        let (phone, phone_pub) = key(7);
+        let (watch, delegation) = watch_of(&phone, 20, |_| {});
+        let proposal = proposal(1);
+        let sig = watch.sign(&sigs::deny_msg(&proposal.digest, b"not now"));
+        let outcome = Outcome::Denied { sig, reason: b"not now".to_vec(), delegation: Some(delegation) };
+        let verdict = proposal.judge(&phone_pub, outcome, NOW);
+        assert!(
+            matches!(verdict, Verdict::Denied { reason, by: Answerer::Watch(name) } if reason == b"not now" && name == b"Test Watch")
+        );
+    }
+
+    #[test]
+    fn a_watch_counts_for_nothing_unless_the_pairing_file_allows_one() {
+        let (phone, phone_pub) = key(7);
+        let (watch, delegation) = watch_of(&phone, 20, |_| {});
+        // The same simple request, on a host whose root has not turned the
+        // watch on. Neither an approval nor a denial is honoured.
+        let proposal = described(1, false, false);
+        let sig = watch.sign(&sigs::approve_msg(&proposal.digest));
+        let verdict = proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: Some(delegation.clone()) }, NOW);
+        assert!(matches!(verdict, Verdict::WatchRefused(WatchRefusal::Off)));
+        let proposal = described(1, false, false);
+        let sig = watch.sign(&sigs::deny_msg(&proposal.digest, b""));
+        let outcome = Outcome::Denied { sig, reason: Vec::new(), delegation: Some(delegation) };
+        assert!(matches!(proposal.judge(&phone_pub, outcome, NOW), Verdict::WatchRefused(WatchRefusal::Off)));
+    }
+
+    #[test]
+    fn an_authorisation_lasts_until_its_last_second_and_no_longer() {
+        let (phone, phone_pub) = key(7);
+        for (not_after, honoured) in [(NOW, true), (NOW - 1, false)] {
+            let (watch, delegation) = watch_of(&phone, 20, |d| d.not_after = not_after);
+            let proposal = simple();
+            let sig = watch.sign(&sigs::approve_msg(&proposal.digest));
+            let verdict = proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: Some(delegation) }, NOW);
+            let as_expected = if honoured {
+                matches!(verdict, Verdict::Approved(_))
+            } else {
+                matches!(verdict, Verdict::WatchRefused(WatchRefusal::Expired))
+            };
+            assert!(as_expected, "expiring at {not_after}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_pinned_phone_can_authorise_a_watch() {
+        let (phone, phone_pub) = key(7);
+        let (stranger, _) = key(8);
+        let approve = |watch: &HostKey, delegation: SignedDelegation| {
+            let proposal = simple();
+            let sig = watch.sign(&sigs::approve_msg(&proposal.digest));
+            proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: Some(delegation) }, NOW)
+        };
+
+        // Signed by some other key: for instance, the watch vouching for itself.
+        let (watch, delegation) = watch_of(&stranger, 20, |_| {});
+        assert!(matches!(approve(&watch, delegation), Verdict::Forged));
+        let (watch, _) = key(20);
+        let (_, self_signed) = watch_of(&watch, 20, |_| {});
+        assert!(matches!(approve(&watch, self_signed), Verdict::Forged));
+
+        // The phone's genuine authorisation, for a different pairing.
+        let (watch, elsewhere) = watch_of(&phone, 20, |d| d.pairing_id = [2; PAIRING_ID_LEN]);
+        assert!(matches!(approve(&watch, elsewhere), Verdict::Forged));
+
+        // The phone's genuine authorisation, with any field changed after
+        // signing: a later expiry, another watch's key, another name.
+        let changes: [fn(&mut Delegation); 4] = [
+            |d| d.not_after += 1_000_000,
+            |d| d.sign_pub = key(21).0.public().unwrap(),
+            |d| d.kem_pub = key(22).0.public().unwrap(),
+            |d| d.name = b"Your Watch".to_vec(),
+        ];
+        for change in changes {
+            let (_, mut altered) = watch_of(&phone, 20, |_| {});
+            change(&mut altered.delegation);
+            // Signed by whichever key the altered authorisation now names.
+            let signer =
+                [key(20).0, key(21).0].into_iter().find(|k| k.public().unwrap() == altered.delegation.sign_pub);
+            assert!(matches!(approve(&signer.unwrap(), altered), Verdict::Forged));
+        }
+
+        // A genuine authorisation of one watch, presented with another
+        // key's signature (or the phone's own).
+        let (_, delegation) = watch_of(&phone, 20, |_| {});
+        assert!(matches!(approve(&key(21).0, delegation.clone()), Verdict::Forged));
+        assert!(matches!(approve(&phone, delegation), Verdict::Forged));
+
+        // A watch key that is not a point on the curve, properly signed for.
+        let (watch, off_curve) = watch_of(&phone, 20, |d| {
+            d.sign_pub = [0x11; PUBKEY_LEN];
+            d.sign_pub[0] = 0x04;
+        });
+        assert!(matches!(approve(&watch, off_curve), Verdict::Forged));
+    }
+
+    #[test]
+    fn a_watchs_signature_is_not_an_answer_without_its_authorisation() {
+        // Presented as if the phone had signed, a watch's signature is just
+        // a signature by the wrong key.
+        let (phone, phone_pub) = key(7);
+        let (watch, _) = watch_of(&phone, 20, |_| {});
+        let proposal = simple();
+        let sig = watch.sign(&sigs::approve_msg(&proposal.digest));
+        assert!(matches!(
+            proposal.judge(&phone_pub, Outcome::Approved { sig, delegation: None }, NOW),
+            Verdict::Forged
+        ));
+    }
+
+    #[test]
+    fn an_authorisation_is_not_an_approval() {
+        // The phone's signature over a delegation cannot be passed off as
+        // its approval of a request, nor the other way round.
+        let (phone, phone_pub) = key(7);
+        let (_, delegation) = watch_of(&phone, 20, |_| {});
+        let proposal = simple();
+        let outcome = Outcome::Approved { sig: delegation.phone_sig, delegation: None };
+        assert!(matches!(proposal.judge(&phone_pub, outcome, NOW), Verdict::Forged));
     }
 }

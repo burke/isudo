@@ -16,10 +16,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use isudo_proto::api::{
-    Ack, Answer, Claim, ClaimView, Confirm, CreatePairing, Decision, DeviceUpdate, PairingState, PairingStatus,
-    PendingList, PendingRequest, Revoke, SubmitRequest,
+    Ack, AddDelegate, Answer, Claim, ClaimView, Confirm, CreatePairing, Decision, DelegateList, DeviceUpdate,
+    PairingState, PairingStatus, PendingList, PendingRequest, RemoveDelegate, Revoke, SubmitRequest,
 };
-use isudo_proto::codec::{b64_decode, b64_decode_array, hex_decode_array, hex_encode};
+use isudo_proto::codec::{b64_decode, b64_decode_array, b64_encode, hex_decode_array, hex_encode};
+use isudo_proto::delegation::SignedDelegation;
 use isudo_proto::pairing::{decode_pubkey, MAX_NAME_LEN};
 use isudo_proto::{
     sigs, MAX_REASON_LEN, MAX_REQUEST_LEN, PAIRING_ID_LEN, PHONE_NONCE_LEN, PUBKEY_LEN, REQUEST_ID_LEN, SIG_LEN,
@@ -84,7 +85,15 @@ pub struct Device {
     pub apns_env: String,
 }
 
-/// A push the shell should send. It names the request; it does not carry it.
+/// Most delegates a pairing may register. A watch; perhaps a second one.
+pub const MAX_DELEGATES: usize = 2;
+/// Largest delegate envelope, in base64 characters, that rides along in a
+/// push. A push holds four kilobytes in all; requests a watch may approve
+/// are far smaller than this.
+pub const MAX_PUSHED_ENVELOPE: usize = 2600;
+
+/// A push the shell should send. It names the request, and may carry the
+/// request sealed to a delegate, which the relay cannot read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Push {
     pub device: Device,
@@ -92,6 +101,19 @@ pub struct Push {
     pub request_id: String,
     pub host_name: String,
     pub expires_at: u64,
+    /// The request sealed to a delegate, if there is one and it is small.
+    /// A watch that is handed the notification can then show the request
+    /// without fetching anything.
+    pub delegate_envelope: Option<String>,
+}
+
+/// A request was answered. The shell tells the phone, quietly, so that the
+/// notification about it can be cleared wherever it is still showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settled {
+    pub device: Device,
+    pub pairing_id: String,
+    pub request_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +132,23 @@ struct ClaimRecord {
     device: Option<Device>,
 }
 
+/// A device the phone has authorised to answer for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DelegateRecord {
+    /// The encoded `SignedDelegation`, as the phone registered it.
+    delegation: String,
+    /// The delegate's signing key, base64: its name here.
+    sign_pub: String,
+    /// SHA-256 of the delegate's bearer token, hex.
+    token_hash: String,
+}
+
+/// Who a bearer token belongs to.
+enum Bearer<'a> {
+    Phone,
+    Delegate(&'a DelegateRecord),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PairingRecord {
     host_pub: String,
@@ -121,6 +160,9 @@ struct PairingRecord {
     acked: Option<Ack>,
     /// The host's confirmation signature, once given.
     confirmed: Option<String>,
+    /// Devices the phone has authorised. Absent from older records.
+    #[serde(default)]
+    delegates: Vec<DelegateRecord>,
     /// Submission times inside the rate window. Not persisted.
     #[serde(skip)]
     recent: VecDeque<u64>,
@@ -131,6 +173,8 @@ struct PendingRecord {
     pairing_id: PairingId,
     expires_at: u64,
     envelope: String,
+    /// The same request sealed to delegates: (signing key, envelope).
+    delegate_envelopes: Vec<(String, String)>,
     answer: Option<Answer>,
 }
 
@@ -201,6 +245,15 @@ impl PairingRecord {
         }
     }
 
+    /// Whose token this is: the phone's, or one of its delegates'.
+    fn bearer(&self, token: &str) -> Result<Bearer<'_>, Reject> {
+        let hash = hex_encode(&token_hash(token));
+        if self.claim.as_ref().is_some_and(|claim| claim.token_hash == hash) {
+            return Ok(Bearer::Phone);
+        }
+        self.delegates.iter().find(|d| d.token_hash == hash).map(Bearer::Delegate).ok_or(Reject::Unauthorized)
+    }
+
     const fn expired(&self, now: u64, limits: &Limits) -> bool {
         self.confirmed.is_none() && now.saturating_sub(self.created_at) > limits.pairing_ttl
     }
@@ -269,6 +322,7 @@ impl Relay {
             claim: None,
             acked: None,
             confirmed: None,
+            delegates: Vec::new(),
             recent: VecDeque::new(),
         };
         let _ = self.pairings.insert(id, record);
@@ -385,6 +439,79 @@ impl Relay {
         Ok(PairingStatus { state: record.state(), ack: record.acked.clone(), host_sig: record.confirmed.clone() })
     }
 
+    /// Phone: registers a device it has authorised, or replaces that
+    /// device's registration with a newer one.
+    ///
+    /// The relay checks the phone's signature so that only the phone can
+    /// add a delegate here. Nobody downstream relies on that check: the
+    /// helper and the host verify the same signature for themselves.
+    ///
+    /// # Errors
+    /// `NotFound`, `Unauthorized` for the wrong token or a delegation the
+    /// phone did not sign, `Invalid` if malformed, `Conflict` if the pairing
+    /// is not active, `TooMany` past [`MAX_DELEGATES`].
+    pub fn add_delegate(&mut self, pairing: &str, token: &str, body: &AddDelegate) -> Result<(), Reject> {
+        let id = pairing_id(pairing)?;
+        let record = self.pairings.get_mut(&id).ok_or(Reject::NotFound)?;
+        let claim = record.authorized(token)?;
+        if record.state() != PairingState::Active {
+            return Err(Reject::Conflict);
+        }
+        let signed = b64_decode(&body.delegation)
+            .ok()
+            .and_then(|bytes| SignedDelegation::decode(&bytes).ok())
+            .ok_or(Reject::Invalid)?;
+        let message = signed.delegation.message().map_err(|_e| Reject::Invalid)?;
+        let delegate_token_hash = hex_encode(&token_hash(&body.delegate_token));
+        if b64_decode_array::<32>(&body.delegate_token).is_err() || delegate_token_hash == claim.token_hash {
+            return Err(Reject::Invalid);
+        }
+        if signed.delegation.pairing_id != id
+            || !verified(&claim.phone_sign_pub, &message, &b64_encode(&signed.phone_sig))
+        {
+            return Err(Reject::Unauthorized);
+        }
+        let sign_pub = b64_encode(&signed.delegation.sign_pub);
+        let entry = DelegateRecord { delegation: body.delegation.clone(), sign_pub, token_hash: delegate_token_hash };
+        if let Some(existing) = record.delegates.iter_mut().find(|d| d.sign_pub == entry.sign_pub) {
+            *existing = entry;
+        } else if record.delegates.len() >= MAX_DELEGATES {
+            return Err(Reject::TooMany);
+        } else {
+            record.delegates.push(entry);
+        }
+        Ok(())
+    }
+
+    /// Phone: removes a delegate. Removing one that is not there is fine.
+    ///
+    /// This stops the relay serving that device. It does not, and cannot,
+    /// make the host refuse it: the host honours a delegation until it runs
+    /// out, or until root turns the watch off.
+    ///
+    /// # Errors
+    /// `NotFound`, or `Unauthorized` for the wrong token.
+    pub fn remove_delegate(&mut self, pairing: &str, token: &str, body: &RemoveDelegate) -> Result<(), Reject> {
+        let record = self.pairings.get_mut(&pairing_id(pairing)?).ok_or(Reject::NotFound)?;
+        let _claim = record.authorized(token)?;
+        record.delegates.retain(|d| d.sign_pub != body.delegate);
+        Ok(())
+    }
+
+    /// Helper: the delegations registered for an active pairing, so that it
+    /// can seal a request to those devices too. Each carries the phone's
+    /// signature, which the helper checks; the relay's say-so is not enough.
+    ///
+    /// # Errors
+    /// `NotFound` for an unknown pairing or one that is not active.
+    pub fn delegations(&self, pairing: &str) -> Result<DelegateList, Reject> {
+        let record = self.pairings.get(&pairing_id(pairing)?).ok_or(Reject::NotFound)?;
+        if record.state() != PairingState::Active {
+            return Err(Reject::NotFound);
+        }
+        Ok(DelegateList { delegations: record.delegates.iter().map(|d| d.delegation.clone()).collect() })
+    }
+
     /// Phone: sets where its pushes go.
     ///
     /// # Errors
@@ -458,7 +585,11 @@ impl Relay {
         let max_envelope = (PUBKEY_LEN.saturating_add(SIG_LEN).saturating_add(MAX_REQUEST_LEN).saturating_add(16))
             .saturating_mul(4)
             .div_ceil(3);
-        if body.envelope.len() > max_envelope || b64_decode(&body.envelope).is_err() {
+        let well_formed = |envelope: &String| envelope.len() <= max_envelope && b64_decode(envelope).is_ok();
+        if !well_formed(&body.envelope)
+            || body.delegate_envelopes.len() > MAX_DELEGATES
+            || !body.delegate_envelopes.iter().all(|sealed| well_formed(&sealed.envelope))
+        {
             return Err(Reject::Invalid);
         }
         if !verified(&record.host_pub, &sigs::ticket_msg(&pairing, &request, body.expires_at), &body.ticket_sig) {
@@ -477,17 +608,29 @@ impl Relay {
         }
         record.recent.push_back(now);
 
+        // Kept only for delegates registered right now, one envelope each.
+        let mut delegate_envelopes: Vec<(String, String)> = Vec::new();
+        for delegate in &record.delegates {
+            if let Some(sealed) = body.delegate_envelopes.iter().find(|sealed| sealed.delegate == delegate.sign_pub) {
+                delegate_envelopes.push((delegate.sign_pub.clone(), sealed.envelope.clone()));
+            }
+        }
         let push = record.claim.as_ref().and_then(|claim| claim.device.clone()).map(|device| Push {
             device,
             pairing_id: body.pairing_id.clone(),
             request_id: body.request_id.clone(),
             host_name: record.host_name.clone(),
             expires_at: body.expires_at,
+            delegate_envelope: delegate_envelopes
+                .first()
+                .map(|(_, envelope)| envelope.clone())
+                .filter(|envelope| envelope.len() <= MAX_PUSHED_ENVELOPE),
         });
         let pending = PendingRecord {
             pairing_id: pairing,
             expires_at: body.expires_at,
             envelope: body.envelope.clone(),
+            delegate_envelopes,
             answer: None,
         };
         let _ = self.requests.insert(request, pending);
@@ -501,33 +644,53 @@ impl Relay {
     pub fn pending(&mut self, now: u64, pairing: &str, token: &str) -> Result<PendingList, Reject> {
         self.sweep(now);
         let id = pairing_id(pairing)?;
-        let _claim = self.pairings.get(&id).ok_or(Reject::NotFound)?.authorized(token)?;
+        let bearer = self.pairings.get(&id).ok_or(Reject::NotFound)?.bearer(token)?;
         let requests = self
             .requests
             .iter()
             .filter(|(_, request)| request.pairing_id == id && request.answer.is_none())
-            .map(|(request_id, request)| PendingRequest {
-                request_id: hex_encode(request_id),
-                expires_at: request.expires_at,
-                envelope: request.envelope.clone(),
+            .filter_map(|(request_id, request)| {
+                // Each bearer gets the envelope sealed to it. A delegate is
+                // not shown requests that were not sealed to it.
+                let envelope = match &bearer {
+                    Bearer::Phone => &request.envelope,
+                    Bearer::Delegate(delegate) => {
+                        &request.delegate_envelopes.iter().find(|(key, _)| *key == delegate.sign_pub)?.1
+                    }
+                };
+                Some(PendingRequest {
+                    request_id: hex_encode(request_id),
+                    expires_at: request.expires_at,
+                    envelope: envelope.clone(),
+                })
             })
             .collect();
         Ok(PendingList { requests })
     }
 
-    /// Phone: its signed answer. The first answer stands.
+    /// Phone or delegate: its signed answer. The first answer stands.
     ///
     /// The relay cannot check the signature's meaning (it cannot read the
-    /// request); the setuid binary does that. It checks shape and sender.
+    /// request); the setuid binary does that. It checks shape and sender,
+    /// and attaches a delegate's delegation, from its own records, to the
+    /// delegate's answer. If it attached the wrong one the host would simply
+    /// find the signatures do not chain.
+    ///
+    /// Returns where to send word that the request is settled, if the phone
+    /// has registered for pushes.
     ///
     /// # Errors
     /// `NotFound` for an unknown or expired request, `Unauthorized` for the
     /// wrong token, `Conflict` if already answered, `Invalid` if malformed.
-    pub fn answer(&mut self, now: u64, request: &str, token: &str, body: Answer) -> Result<(), Reject> {
+    pub fn answer(&mut self, now: u64, request: &str, token: &str, body: Answer) -> Result<Option<Settled>, Reject> {
         self.sweep(now);
         let id = request_id(request)?;
         let pending = self.requests.get_mut(&id).ok_or(Reject::NotFound)?;
-        let _claim = self.pairings.get(&pending.pairing_id).ok_or(Reject::NotFound)?.authorized(token)?;
+        let record = self.pairings.get(&pending.pairing_id).ok_or(Reject::NotFound)?;
+        let delegation = match record.bearer(token)? {
+            Bearer::Phone => None,
+            Bearer::Delegate(delegate) => Some(delegate.delegation.clone()),
+        };
         if pending.answer.is_some() {
             return Err(Reject::Conflict);
         }
@@ -539,8 +702,12 @@ impl Relay {
         if !shape_ok || b64_decode_array::<SIG_LEN>(&body.sig).is_err() {
             return Err(Reject::Invalid);
         }
-        pending.answer = Some(body);
-        Ok(())
+        pending.answer = Some(Answer { delegation, ..body });
+        Ok(record.claim.as_ref().and_then(|claim| claim.device.clone()).map(|device| Settled {
+            device,
+            pairing_id: hex_encode(&pending.pairing_id),
+            request_id: request.to_owned(),
+        }))
     }
 
     /// Helper: the phone's answer, if it has arrived.

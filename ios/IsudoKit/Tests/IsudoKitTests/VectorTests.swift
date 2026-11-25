@@ -325,7 +325,9 @@ struct Vectors {
 
     @Test func everySectionIsCovered() {
         // If the generator grows a section, a test must be added for it.
-        let known: Set = ["about", "codec", "request", "messages", "signatures", "pairing", "envelope", "escape", "env_risk"]
+        let known: Set = [
+            "about", "codec", "request", "messages", "signatures", "pairing", "envelope", "delegation", "escape", "env_risk",
+        ]
         #expect(Set(vectors.root.keys) == known)
     }
 }

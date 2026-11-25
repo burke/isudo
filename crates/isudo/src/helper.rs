@@ -35,7 +35,7 @@ const HELPER_ENV: [&[u8]; 6] = [b"HTTPS_PROXY", b"https_proxy", b"ALL_PROXY", b"
 
 #[derive(Debug)]
 pub(crate) enum Answer {
-    Outcome(Outcome),
+    Outcome(Box<Outcome>),
     /// The helper produced nothing usable; the message says why.
     Nothing(&'static str),
 }
@@ -132,5 +132,7 @@ fn converse(child: &mut Child, job: &[u8], deadline: Instant) -> Result<Answer, 
     if answer.is_empty() {
         return Ok(Answer::Nothing("the helper exited without an answer"));
     }
-    Ok(Outcome::decode(&answer).map_or(Answer::Nothing("the helper returned a malformed answer"), Answer::Outcome))
+    Ok(Outcome::decode(&answer).map_or(Answer::Nothing("the helper returned a malformed answer"), |outcome| {
+        Answer::Outcome(Box::new(outcome))
+    }))
 }

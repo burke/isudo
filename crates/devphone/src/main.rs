@@ -18,19 +18,27 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use isudo_client::relay::{Relay, RelayError};
-use isudo_phone::{Pairing, Progress};
-use isudo_proto::codec::{hex_decode_array, hex_encode};
+use isudo_phone::{Card, Delegate, Pairing, Progress, Refusal};
+use isudo_proto::api::{AddDelegate, Answer, PendingRequest};
+use isudo_proto::codec::{b64_decode, b64_encode, hex_decode_array, hex_encode};
+use isudo_proto::delegation::SignedDelegation;
 use isudo_proto::pairing::Offer;
 use serde::{Deserialize, Serialize};
 
 const USAGE: &str = "\
 usage: isudo-devphone pair LINK [--state FILE] [--name NAME]
        isudo-devphone watch [--state FILE] [--approve | --deny[=REASON]] [--once]
+       isudo-devphone add-watch WATCH_FILE [--state FILE] [--name NAME] [--valid-for SECONDS]
        isudo-devphone unpair [--state FILE]
 
 A stand-in for the phone app, for testing. LINK is the isudo://pair?... link
 printed by `isudo-admin pair`. The state file (default ./isudo-devphone.json)
-holds this phone's key in the clear.";
+holds this phone's key in the clear.
+
+`watch` waits for requests and answers them. `add-watch` makes a stand-in for
+the person's watch: a second device with keys of its own, authorised by this
+phone and written to WATCH_FILE. Run `watch --state WATCH_FILE` to be that
+watch, which may approve only what the computer marks as simple.";
 
 const DEFAULT_STATE: &str = "isudo-devphone.json";
 const PAIRING_WAIT: Duration = Duration::from_secs(300);
@@ -42,6 +50,71 @@ struct Stored {
     offer: String,
     seed: String,
     active: bool,
+    /// Present in a watch's state file: the phone's authorisation of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegation: Option<String>,
+}
+
+/// How long a stand-in watch is authorised for unless told otherwise.
+const DEFAULT_VALID_FOR_SECS: u64 = 24 * 60 * 60;
+
+/// Whichever device a state file describes.
+enum Device {
+    Phone(Pairing),
+    Watch(Delegate),
+}
+
+impl Device {
+    fn relay_url(&self) -> &str {
+        match self {
+            Self::Phone(phone) => phone.relay_url(),
+            Self::Watch(watch) => watch.relay_url(),
+        }
+    }
+
+    fn host_name(&self) -> &str {
+        match self {
+            Self::Phone(phone) => phone.host_name(),
+            Self::Watch(watch) => watch.host_name(),
+        }
+    }
+
+    fn id_hex(&self) -> String {
+        match self {
+            Self::Phone(phone) => phone.id_hex(),
+            Self::Watch(watch) => watch.id_hex(),
+        }
+    }
+
+    fn token(&self) -> &str {
+        match self {
+            Self::Phone(phone) => phone.token(),
+            Self::Watch(watch) => watch.token(),
+        }
+    }
+
+    fn open(&mut self, delivered: &PendingRequest, now: u64) -> Result<Card, Refusal> {
+        match self {
+            Self::Phone(phone) => phone.open(delivered, now),
+            Self::Watch(watch) => watch.open(delivered, now),
+        }
+    }
+
+    /// None if this device may not approve the card: a watch looking at
+    /// something only the phone may approve.
+    fn approve(&self, card: &Card) -> Option<Answer> {
+        match self {
+            Self::Phone(phone) => Some(phone.approve(card)),
+            Self::Watch(watch) => watch.approve(card),
+        }
+    }
+
+    fn deny(&self, card: &Card, reason: &str) -> Answer {
+        match self {
+            Self::Phone(phone) => phone.deny(card, reason),
+            Self::Watch(watch) => watch.deny(card, reason),
+        }
+    }
 }
 
 fn say(text: &str) {
@@ -78,6 +151,56 @@ fn load(path: &Path) -> Result<(Stored, Pairing), String> {
     Ok((stored, pairing))
 }
 
+/// Loads a state file as whichever device it describes.
+fn load_device(path: &Path) -> Result<Device, String> {
+    let (stored, pairing) = load(path)?;
+    let Some(encoded) = &stored.delegation else {
+        if !pairing.is_active() {
+            return Err("this pairing was never confirmed by the computer; pair again".to_owned());
+        }
+        return Ok(Device::Phone(pairing));
+    };
+    let not_ours = || format!("{} does not hold an authorisation for its own keys", path.display());
+    let offer = Offer::from_url(&stored.offer).map_err(|e| format!("{}: {e}", path.display()))?;
+    let seed = hex_decode_array(&stored.seed).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut watch = Delegate::begin(offer.pairing_id, offer.host_pub, &offer.host_name, &offer.relay_url, &seed)
+        .map_err(|e| e.to_string())?;
+    let signed =
+        b64_decode(encoded).ok().and_then(|bytes| SignedDelegation::decode(&bytes).ok()).ok_or_else(not_ours)?;
+    if !watch.accept(signed) {
+        return Err(not_ours());
+    }
+    Ok(Device::Watch(watch))
+}
+
+/// The phone authorises a stand-in watch and tells the relay about it.
+fn add_watch(state: &Path, watch_state: &Path, name: &str, valid_for: u64) -> Result<(), String> {
+    let (stored, phone) = load(state)?;
+    if stored.delegation.is_some() {
+        return Err(format!("{} is a watch's state file; a watch cannot authorise another", state.display()));
+    }
+    let offer = Offer::from_url(&stored.offer).map_err(|e| format!("{}: {e}", state.display()))?;
+    let seed: [u8; 32] = isudo_client::random().map_err(|e| format!("cannot get random bytes: {e}"))?;
+    let mut watch = Delegate::begin(offer.pairing_id, offer.host_pub, &offer.host_name, &offer.relay_url, &seed)
+        .map_err(|e| e.to_string())?;
+    let signed = phone
+        .delegate(watch.sign_pub(), watch.kem_pub(), name, now().saturating_add(valid_for))
+        .ok_or("this phone cannot authorise a watch: it is not paired, or the name is not usable")?;
+    let encoded = b64_encode(&signed.encode().map_err(|e| e.to_string())?);
+
+    let relay = Relay::new(phone.relay_url()).map_err(|e| e.to_string())?;
+    let body = AddDelegate { delegation: encoded.clone(), delegate_token: watch.token().to_owned() };
+    relay.add_delegate(&phone.id_hex(), phone.token(), &body).map_err(|e| e.to_string())?;
+    if !watch.accept(signed) {
+        return Err("the watch did not take its own authorisation".to_owned());
+    }
+    let stored = Stored { offer: stored.offer, seed: hex_encode(&seed), active: true, delegation: Some(encoded) };
+    save(watch_state, &stored)?;
+    say(&format!("Authorised {name} to answer for {} for {valid_for}s.", phone.host_name()));
+    say("It counts for nothing until root runs `isudo-admin watch on` on that computer.");
+    Ok(())
+}
+
 fn pair(link: &str, state: &Path, name: &str) -> Result<(), String> {
     let offer = Offer::from_url(link).map_err(|e| e.to_string())?;
     let seed: [u8; 32] = isudo_client::random().map_err(|e| format!("cannot get random bytes: {e}"))?;
@@ -93,7 +216,7 @@ fn pair(link: &str, state: &Path, name: &str) -> Result<(), String> {
         }
         Err(e) => return Err(e.to_string()),
     }
-    let mut stored = Stored { offer: offer.to_url(), seed: hex_encode(&seed), active: false };
+    let mut stored = Stored { offer: offer.to_url(), seed: hex_encode(&seed), active: false, delegation: None };
     save(state, &stored)?;
 
     say(&format!("Pairing with {}.", pairing.host_name()));
@@ -149,19 +272,17 @@ fn ask() -> Choice {
 }
 
 fn watch(state: &Path, policy: &Policy, once: bool) -> Result<(), String> {
-    let (_stored, mut pairing) = load(state)?;
-    if !pairing.is_active() {
-        return Err("this pairing was never confirmed by the computer; pair again".to_owned());
-    }
+    let mut pairing = load_device(state)?;
     let relay = Relay::new(pairing.relay_url()).map_err(|e| e.to_string())?;
-    say(&format!("Watching for requests from {}. Ctrl-C to stop.", pairing.host_name()));
+    let as_what = if matches!(pairing, Device::Watch(_)) { ", as a watch" } else { "" };
+    say(&format!("Watching for requests from {}{as_what}. Ctrl-C to stop.", pairing.host_name()));
 
     // Requests already refused, so each refusal is reported once.
     let mut refused = BTreeSet::new();
     loop {
         let waiting = match relay.pending(&pairing.id_hex(), pairing.token()) {
             Ok(list) => list.requests,
-            Err(RelayError::Status(404 | 401)) => return Err("this phone is no longer paired".to_owned()),
+            Err(RelayError::Status(404 | 401)) => return Err("this device is no longer paired".to_owned()),
             Err(e) => {
                 say(&format!("  ({e}; retrying)"));
                 Vec::new()
@@ -186,7 +307,19 @@ fn watch(state: &Path, policy: &Policy, once: bool) -> Result<(), String> {
                 Policy::Deny(reason) => Choice::Deny(reason.clone()),
             };
             let (answer, verb) = match choice {
-                Choice::Approve => (pairing.approve(&card), "approved"),
+                Choice::Approve => {
+                    let Some(answer) = pairing.approve(&card) else {
+                        // A watch, and not a request a watch may approve. A
+                        // real one would say so and leave it for the phone.
+                        say("  only the phone may approve this; left for the phone");
+                        let _ = refused.insert(delivered.request_id);
+                        if once {
+                            return Ok(());
+                        }
+                        continue;
+                    };
+                    (answer, "approved")
+                }
                 Choice::Deny(reason) => (pairing.deny(&card, &reason), "denied"),
             };
             match relay.answer(&card.request_id_hex(), pairing.token(), &answer) {
@@ -217,6 +350,7 @@ fn unpair(state: &Path) -> Result<(), String> {
 struct Options {
     state: PathBuf,
     name: String,
+    valid_for: u64,
     policy: Policy,
     once: bool,
     positional: Vec<String>,
@@ -226,6 +360,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut options = Options {
         state: DEFAULT_STATE.into(),
         name: "isudo-devphone".to_owned(),
+        valid_for: DEFAULT_VALID_FOR_SECS,
         policy: Policy::Ask,
         once: false,
         positional: Vec::new(),
@@ -236,6 +371,9 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Options, String> {
         match arg.as_str() {
             "--state" => options.state = value("--state")?.into(),
             "--name" => options.name = value("--name")?,
+            "--valid-for" => {
+                options.valid_for = value("--valid-for")?.parse().map_err(|e| format!("--valid-for: {e}"))?;
+            }
             "--approve" => options.policy = Policy::Approve,
             "--deny" => options.policy = Policy::Deny(String::new()),
             "--once" => options.once = true,
@@ -260,6 +398,9 @@ fn run() -> Result<(), String> {
     match (command.as_str(), options.positional.as_slice()) {
         ("pair", [link]) => pair(link, &options.state, &options.name),
         ("watch", []) => watch(&options.state, &options.policy, options.once),
+        ("add-watch", [watch_state]) => {
+            add_watch(&options.state, Path::new(watch_state), &options.name, options.valid_for)
+        }
         ("unpair", []) => unpair(&options.state),
         _ => Err(USAGE.to_owned()),
     }

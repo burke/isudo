@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: dev.isudo
   deploymentTarget:
     iOS: "26.0"
+    watchOS: "26.0"
   createIntermediateGroups: true
   generateEmptyDirectories: true
 packages:
@@ -30,6 +31,8 @@ targets:
       - path: App/Resources
     dependencies:
       - package: IsudoKit
+      # The watch app travels inside the phone app and installs with it.
+      - target: IsudoWatch
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(ISUDO_BUNDLE_ID)
@@ -60,6 +63,46 @@ targets:
       properties:
         aps-environment: development
         com.apple.developer.usernotifications.time-sensitive: true
+  # The watch app: a second, lesser approver. It has its own keys, shows the
+  # same requests, and may approve only those the computer marks as simple.
+  IsudoWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - path: Watch/Sources
+      - path: Watch/Resources
+    dependencies:
+      - package: IsudoKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ISUDO_BUNDLE_ID).watch
+        PRODUCT_NAME: isudo-watch
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+    info:
+      path: Watch/Info.plist
+      properties:
+        CFBundleDisplayName: isudo
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: $(ISUDO_BUNDLE_ID)
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        ITSAppUsesNonExemptEncryption: false
+  IsudoWatchUITests:
+    type: bundle.ui-testing
+    platform: watchOS
+    sources:
+      - path: Watch/UITests
+    dependencies:
+      - target: IsudoWatch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ISUDO_BUNDLE_ID).watch.uitests
+        TEST_TARGET_NAME: IsudoWatch
+        GENERATE_INFOPLIST_FILE: YES
   IsudoUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -83,3 +126,14 @@ schemes:
     test:
       config: Debug
       targets: [IsudoUITests]
+  # The watch app alone, for running it in a watch Simulator.
+  IsudoWatch:
+    build:
+      targets:
+        IsudoWatch: all
+        IsudoWatchUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [IsudoWatchUITests]

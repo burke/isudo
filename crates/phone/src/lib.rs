@@ -16,8 +16,9 @@ use std::fmt;
 use isudo_client::envelope;
 use isudo_proto::api::{Answer, Claim, Decision, DeviceUpdate, PairingState, PairingStatus, PendingRequest};
 use isudo_proto::codec::{b64_decode, b64_decode_array, b64_encode, hex_decode_array, hex_encode};
+use isudo_proto::delegation::{simple_enough, Delegation, SignedDelegation};
 use isudo_proto::pairing::{self, Offer, Parties};
-use isudo_proto::request::Request;
+use isudo_proto::request::{Request, FLAG_DELEGABLE};
 use isudo_proto::{
     sigs, COMMITMENT_LEN, HOST_NONCE_LEN, MAX_REASON_LEN, PAIRING_ID_LEN, PHONE_NONCE_LEN, PUBKEY_LEN, REQUEST_ID_LEN,
     SIG_LEN,
@@ -50,11 +51,14 @@ pub enum Refusal {
     Expired,
     /// This request was already shown.
     AlreadySeen,
+    /// A watch only: the phone's authorisation of it has run out.
+    AuthorisationExpired,
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::AuthorisationExpired => "the phone's authorisation of this watch has run out",
             Self::NotActive => "this pairing is not active",
             Self::Undecryptable => "the request could not be decrypted",
             Self::NotFromHost => "the request was not signed by the paired computer",
@@ -352,53 +356,266 @@ impl Pairing {
         if !self.active {
             return Err(Refusal::NotActive);
         }
-        let sealed = b64_decode(&delivered.envelope).map_err(|_e| Refusal::Undecryptable)?;
-        let (host_sig, bytes) =
-            envelope::open(&self.kem_private, &self.id, &sealed).map_err(|_e| Refusal::Undecryptable)?;
-        if !self.host_signed_raw(&sigs::host_request_msg(&bytes), &host_sig) {
-            return Err(Refusal::NotFromHost);
-        }
-        let request = Request::decode(&bytes).map_err(|_e| Refusal::Malformed)?;
-        let request_id = sigs::request_id(&bytes);
-        if request.pairing_id != self.id || hex_decode_array(&delivered.request_id) != Ok(request_id) {
-            return Err(Refusal::Malformed);
-        }
-        let expires_at = request.issued_at.saturating_add(u64::from(request.ttl_secs));
-        if now > expires_at.saturating_add(CLOCK_SKEW_SECS) {
-            return Err(Refusal::Expired);
-        }
-        if !self.seen.insert(request_id) {
-            return Err(Refusal::AlreadySeen);
-        }
-        while self.seen.len() > MAX_SEEN {
-            let _ = self.seen.pop_first();
-        }
-        Ok(Card { digest: sigs::request_digest(&bytes), request_id, expires_at, request })
+        let host = Host { id: &self.id, host_pub: &self.host_pub };
+        host.open(&self.kem_private, &mut self.seen, delivered, now)
     }
 
     /// Signs an approval of a card. On a real phone this is the step behind
     /// Face ID.
     #[must_use]
     pub fn approve(&self, card: &Card) -> Answer {
-        let signature: Signature = self.sign_key.sign(&sigs::approve_msg(&card.digest));
-        Answer { decision: Decision::Approve, sig: b64_encode(&signature.to_bytes()), reason: None }
+        approval(&self.sign_key, card)
     }
 
     /// Signs a denial of a card, with an optional reason for the caller. The
     /// reason is cut to the protocol's limit at a character boundary.
     #[must_use]
     pub fn deny(&self, card: &Card, reason: &str) -> Answer {
-        let mut end = reason.len().min(MAX_REASON_LEN);
-        while !reason.is_char_boundary(end) {
-            end = end.saturating_sub(1);
+        denial(&self.sign_key, card, reason)
+    }
+
+    /// Authorises a second device, a watch, to answer for this pairing until
+    /// `not_after`. On a real phone this is behind Face ID, like an
+    /// approval, and the watch's keys arrive over the link between the
+    /// phone and its own watch.
+    ///
+    /// Returns None unless the pairing is active and the name is one that
+    /// reads the way it is written.
+    #[must_use]
+    pub fn delegate(
+        &self,
+        sign_pub: &[u8; PUBKEY_LEN],
+        kem_pub: &[u8; PUBKEY_LEN],
+        name: &str,
+        not_after: u64,
+    ) -> Option<SignedDelegation> {
+        if !self.active {
+            return None;
         }
-        let reason = reason.get(..end).unwrap_or_default();
-        let signature: Signature = self.sign_key.sign(&sigs::deny_msg(&card.digest, reason.as_bytes()));
-        Answer {
-            decision: Decision::Deny,
-            sig: b64_encode(&signature.to_bytes()),
-            reason: Some(reason.to_owned()).filter(|r| !r.is_empty()),
+        let delegation = Delegation {
+            pairing_id: self.id,
+            sign_pub: *sign_pub,
+            kem_pub: *kem_pub,
+            not_after,
+            name: name.as_bytes().to_vec(),
+        };
+        let signature: Signature = self.sign_key.sign(&delegation.message().ok()?);
+        Some(SignedDelegation { delegation, phone_sig: signature.to_bytes().into() })
+    }
+}
+
+/// The host a device answers to: what a delivered request is checked against.
+struct Host<'a> {
+    id: &'a [u8; PAIRING_ID_LEN],
+    host_pub: &'a [u8; PUBKEY_LEN],
+}
+
+impl Host<'_> {
+    /// The checks every approving device makes, in this order, before a
+    /// request may be shown.
+    fn open(
+        &self,
+        kem_private: &[u8; envelope::PRIVATE_KEY_LEN],
+        seen: &mut BTreeSet<[u8; REQUEST_ID_LEN]>,
+        delivered: &PendingRequest,
+        now: u64,
+    ) -> Result<Card, Refusal> {
+        let sealed = b64_decode(&delivered.envelope).map_err(|_e| Refusal::Undecryptable)?;
+        let (host_sig, bytes) = envelope::open(kem_private, self.id, &sealed).map_err(|_e| Refusal::Undecryptable)?;
+        let signed_by_host = match (VerifyingKey::from_sec1_bytes(self.host_pub), Signature::from_slice(&host_sig)) {
+            (Ok(key), Ok(sig)) => key.verify(&sigs::host_request_msg(&bytes), &sig).is_ok(),
+            _ => false,
+        };
+        if !signed_by_host {
+            return Err(Refusal::NotFromHost);
         }
+        let request = Request::decode(&bytes).map_err(|_e| Refusal::Malformed)?;
+        let request_id = sigs::request_id(&bytes);
+        if request.pairing_id != *self.id || hex_decode_array(&delivered.request_id) != Ok(request_id) {
+            return Err(Refusal::Malformed);
+        }
+        let expires_at = request.issued_at.saturating_add(u64::from(request.ttl_secs));
+        if now > expires_at.saturating_add(CLOCK_SKEW_SECS) {
+            return Err(Refusal::Expired);
+        }
+        if !seen.insert(request_id) {
+            return Err(Refusal::AlreadySeen);
+        }
+        while seen.len() > MAX_SEEN {
+            let _ = seen.pop_first();
+        }
+        Ok(Card { digest: sigs::request_digest(&bytes), request_id, expires_at, request })
+    }
+}
+
+fn approval(key: &SigningKey, card: &Card) -> Answer {
+    let signature: Signature = key.sign(&sigs::approve_msg(&card.digest));
+    Answer { decision: Decision::Approve, sig: b64_encode(&signature.to_bytes()), reason: None, delegation: None }
+}
+
+fn denial(key: &SigningKey, card: &Card, reason: &str) -> Answer {
+    let mut end = reason.len().min(MAX_REASON_LEN);
+    while !reason.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let reason = reason.get(..end).unwrap_or_default();
+    let signature: Signature = key.sign(&sigs::deny_msg(&card.digest, reason.as_bytes()));
+    Answer {
+        decision: Decision::Deny,
+        sig: b64_encode(&signature.to_bytes()),
+        reason: Some(reason.to_owned()).filter(|r| !r.is_empty()),
+        delegation: None,
+    }
+}
+
+/// A watch, from its own point of view: the second, lesser approver.
+///
+/// It has keys of its own, made on the watch. It can answer only once the
+/// phone has signed a [`Delegation`] naming those keys, and only until that
+/// runs out. It makes every check the phone makes before showing a request.
+/// It may deny anything, and may approve only a request that the host marked
+/// as simple enough ([`FLAG_DELEGABLE`]) and that it finds simple enough
+/// itself.
+#[derive(Debug, Clone)]
+pub struct Delegate {
+    id: [u8; PAIRING_ID_LEN],
+    host_pub: [u8; PUBKEY_LEN],
+    host_name: String,
+    relay_url: String,
+    sign_key: SigningKey,
+    sign_pub: [u8; PUBKEY_LEN],
+    kem_private: [u8; envelope::PRIVATE_KEY_LEN],
+    kem_pub: [u8; PUBKEY_LEN],
+    token: String,
+    delegation: Option<SignedDelegation>,
+    seen: BTreeSet<[u8; REQUEST_ID_LEN]>,
+}
+
+impl Delegate {
+    /// Makes this device's keys for one pairing, from `seed`. Nothing can be
+    /// answered until [`Delegate::accept`] has been given the phone's
+    /// authorisation of them.
+    ///
+    /// # Errors
+    /// Fails if the host key is invalid.
+    pub fn begin(
+        pairing_id: [u8; PAIRING_ID_LEN],
+        host_pub: [u8; PUBKEY_LEN],
+        host_name: &str,
+        relay_url: &str,
+        seed: &[u8; 32],
+    ) -> Result<Self, PairingError> {
+        let _host = VerifyingKey::from_sec1_bytes(&host_pub).map_err(|_e| PairingError::BadOffer)?;
+        let sign_key = SigningKey::from_slice(&derive(seed, b"sign")).map_err(|_e| PairingError::BadSeed)?;
+        let sign_pub =
+            sign_key.verifying_key().to_sec1_point(false).as_bytes().try_into().map_err(|_e| PairingError::BadSeed)?;
+        let (kem_private, kem_pub) = envelope::derive(&derive(seed, b"kem")).map_err(|_e| PairingError::BadSeed)?;
+        Ok(Self {
+            id: pairing_id,
+            host_pub,
+            host_name: host_name.to_owned(),
+            relay_url: relay_url.to_owned(),
+            sign_key,
+            sign_pub,
+            kem_private,
+            kem_pub,
+            token: b64_encode(&derive(seed, b"token")),
+            delegation: None,
+            seen: BTreeSet::new(),
+        })
+    }
+
+    #[must_use]
+    pub fn id_hex(&self) -> String {
+        hex_encode(&self.id)
+    }
+
+    #[must_use]
+    pub fn host_name(&self) -> &str {
+        &self.host_name
+    }
+
+    #[must_use]
+    pub fn relay_url(&self) -> &str {
+        &self.relay_url
+    }
+
+    /// The bearer token this device presents to the relay.
+    #[must_use]
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// The key whose signatures the host will accept, under the delegation.
+    #[must_use]
+    pub const fn sign_pub(&self) -> &[u8; PUBKEY_LEN] {
+        &self.sign_pub
+    }
+
+    /// The key requests are sealed to for this device.
+    #[must_use]
+    pub const fn kem_pub(&self) -> &[u8; PUBKEY_LEN] {
+        &self.kem_pub
+    }
+
+    /// The phone's authorisation, once accepted.
+    #[must_use]
+    pub const fn delegation(&self) -> Option<&SignedDelegation> {
+        self.delegation.as_ref()
+    }
+
+    /// Takes the phone's authorisation, if it is for this device's own keys
+    /// and this pairing. Returns whether it was taken.
+    ///
+    /// The phone's signature is not checked here. A watch gets this from its
+    /// own phone, and gains nothing from a forged one: the host checks the
+    /// signature against the key it pinned.
+    pub fn accept(&mut self, signed: SignedDelegation) -> bool {
+        let ours = signed.delegation.pairing_id == self.id
+            && signed.delegation.sign_pub == self.sign_pub
+            && signed.delegation.kem_pub == self.kem_pub;
+        if ours {
+            self.delegation = Some(signed);
+        }
+        ours
+    }
+
+    /// Checks a delivered request exactly as the phone does, and returns the
+    /// card to show.
+    ///
+    /// # Errors
+    /// Returns the first check that failed. Without a current authorisation
+    /// from the phone, nothing is shown at all.
+    pub fn open(&mut self, delivered: &PendingRequest, now: u64) -> Result<Card, Refusal> {
+        let Some(signed) = &self.delegation else { return Err(Refusal::NotActive) };
+        if now > signed.delegation.not_after {
+            return Err(Refusal::AuthorisationExpired);
+        }
+        let host = Host { id: &self.id, host_pub: &self.host_pub };
+        host.open(&self.kem_private, &mut self.seen, delivered, now)
+    }
+
+    /// Whether this device may offer to approve `card`. Otherwise it shows
+    /// the request, offers to deny it, and sends the person to their phone.
+    ///
+    /// Both must hold: the host said it would honour a watch on this
+    /// request, and the request is simple enough by this device's own
+    /// reading of the same rule.
+    #[must_use]
+    pub fn may_approve(card: &Card) -> bool {
+        card.request.flags & FLAG_DELEGABLE != 0 && simple_enough(&card.request)
+    }
+
+    /// Signs an approval of a card, if this device may approve it.
+    #[must_use]
+    pub fn approve(&self, card: &Card) -> Option<Answer> {
+        Self::may_approve(card).then(|| approval(&self.sign_key, card))
+    }
+
+    /// Signs a denial of a card. A watch may deny anything.
+    #[must_use]
+    pub fn deny(&self, card: &Card, reason: &str) -> Answer {
+        denial(&self.sign_key, card, reason)
     }
 }
 

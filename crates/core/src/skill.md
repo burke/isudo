@@ -49,6 +49,13 @@ cold.
 - **Do not ask more often than you need to.** Every request interrupts a
   person. Do everything that does not need root first, and work out the
   exact privileged commands before asking.
+- **Simple requests get answered fastest.** If the user has allowed their
+  watch, they can approve from the wrist without picking up the phone, but
+  only a request that is plain to read on a small screen: a program from the
+  system directories, a few short arguments in ordinary ASCII, no variables
+  set on the command line, no `--preserve-env`, nothing piped in. Anything
+  else still works; it just waits for the phone. Do not contort a command to
+  fit, and never hide work in a script to make the request look short.
 
 ## Environment and paths
 
@@ -78,15 +85,15 @@ There is no `-u`, `-E`, `-i` or `-s`. isudo runs one command as root.
 | Exit status | Meaning |
 |---|---|
 | the command's own | Approved, and the command ran. Its output is the command's output. |
-| 1, `isudo: denied on ...` | The user said no. Any quoted text after it is their reason. |
+| 1, `isudo: denied on ...` | The user said no, on the device named. Quoted text after it is their reason; `(no reason given)` means they gave none. |
 | 1, `isudo: not approved: ...` | No answer arrived (timeout, relay unreachable, cancelled). |
 | 126 | The command was found but could not be run. |
 | 127 | Command not found in the system directories. Give its path. |
 
 **A denial is an instruction from the user.** If it carries a reason
 (`denied on Burke's iPhone: "use the staging database"`), that text was
-written by the user and signed by their phone; follow it as you would a
-message from them. Do not retry the same command, reword it to slip past, or
+written by the user and signed by their phone or watch; follow it as you
+would a message from them. Do not retry the same command, reword it to slip past, or
 look for another route to root. If there is no reason, stop and ask what
 they would like instead.
 

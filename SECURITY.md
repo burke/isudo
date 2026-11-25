@@ -18,8 +18,9 @@ environment, working directory, open files, limits and signal state, can
 tamper with the unprivileged helper, and controls the relay and the network:
 
 1. A command runs as root only if the paired phone's key signed an approval
-   of that exact request, and the path, arguments and environment executed
-   are the ones in the signed request.
+   of that exact request (or, within the limits of point 7, the key of a
+   watch that phone authorised did), and the path, arguments and environment
+   executed are the ones in the signed request.
 2. Nothing short of that signature makes root code execute, read or write
    anything.
 3. An approval cannot be used twice, for a different invocation, or after
@@ -36,6 +37,14 @@ tamper with the unprivileged helper, and controls the relay and the network:
    blind guess at six digits: one chance in a million, and each try needs
    the person to agree on the phone and then type a code that fails.
 
+7. If a watch is in use: a command runs on a watch's approval only if root
+   on the computer has allowed a watch, the computer itself marked that
+   request as one a watch may approve, the paired phone signed for that
+   watch's key for this pairing, and that signature has not run out. A watch
+   can do nothing a phone could not, and nobody but the paired phone can
+   appoint one: not the relay, not the watch itself, not someone holding
+   the computer's key.
+
 A way to break any of these is a vulnerability.
 
 ## What is out of scope
@@ -48,6 +57,12 @@ These are documented limits, not bugs:
 - Other routes to root on the same machine (passwordless `sudo`, the
   `docker` group, a writable shell startup file).
 - A person approving a request without reading it.
+- What an authorised watch does within its limits. A watch cannot check a
+  face: whoever is wearing your unlocked watch can approve a simple request
+  on it. If a watch is lost, turn the watch off on each computer (`sudo
+  isudo-admin watch off`, effective at once); the phone's permission
+  otherwise lasts until it runs out, up to ninety days, whatever the relay
+  is told.
 - Pairing while something hostile can type into the terminal running
   `isudo-admin pair`. Pairing takes whoever types the six digits to be the
   person holding the phone. (Anything that can do that can usually ride the

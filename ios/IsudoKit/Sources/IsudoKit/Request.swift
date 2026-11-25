@@ -122,7 +122,7 @@ public struct Request: Equatable, Sendable {
     public static let magic = Data("ISUDORQ".utf8) + [1]
     /// The executable, or its directory, can be modified without root.
     public static let flagExeWritable: UInt8 = 0x01
-    private static let knownFlags: UInt8 = flagExeWritable
+    private static let knownFlags: UInt8 = flagExeWritable | flagDelegable
 
     public var nonce: Data
     public var pairingID: Data

@@ -93,6 +93,74 @@ public enum SignerError: Error, Equatable, Sendable {
     case notAuthenticated
 }
 
+#if os(watchOS)
+/// A P-256 key generated inside the watch's Secure Enclave. It cannot be
+/// exported or used on any other device.
+///
+/// A watch cannot check a face. What it can say is that it was unlocked with
+/// its passcode and has not left the wrist since, and that is all this key
+/// asks for:
+///
+/// - The key exists only while the watch has a passcode. Without one a
+///   watch never locks, so there would be nothing to be present for.
+/// - It can be used only while the watch is unlocked.
+/// - Before each signature the system is asked whether the watch has been
+///   on the wrist continuously since it was unlocked.
+///
+/// This is weaker than the phone's key, which needs a currently enrolled
+/// face or finger for every signature. That is why a watch may approve only
+/// what the computer marks as simple, and only if root has allowed a watch.
+public struct SecureEnclaveSigner: ApprovalSigner {
+    public let publicKey: Data
+    public let isHardwareBacked = true
+    let blob: Data
+
+    public static func create(account: String, in store: some SecretStore) throws -> SecureEnclaveSigner {
+        // Refused now, when the watch is being set up, if it could never
+        // sign: no passcode, or wrist detection off. Better said here than
+        // discovered at the first request.
+        guard SecureEnclave.isAvailable,
+              LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithWristDetection, error: nil)
+        else { throw SignerError.biometryUnavailable }
+        var error: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, [.privateKeyUsage], &error
+        ) else { throw SignerError.biometryUnavailable }
+        let key: SecureEnclave.P256.Signing.PrivateKey
+        do {
+            key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
+        } catch {
+            throw SignerError.biometryUnavailable
+        }
+        try store.write(account, key.dataRepresentation)
+        return SecureEnclaveSigner(publicKey: key.publicKey.x963Representation, blob: key.dataRepresentation)
+    }
+
+    public static func load(account: String, from store: some SecretStore, publicKey: Data) throws -> SecureEnclaveSigner {
+        guard let blob = try store.read(account) else { throw SignerError.keyUnusable }
+        return SecureEnclaveSigner(publicKey: publicKey, blob: blob)
+    }
+
+    public func sign(_ message: Data, prompt: String) async throws -> Data {
+        let context = LAContext()
+        do {
+            guard try await context.evaluatePolicy(.deviceOwnerAuthenticationWithWristDetection, localizedReason: prompt)
+            else { throw SignerError.notAuthenticated }
+        } catch {
+            throw SignerError.notAuthenticated
+        }
+        do {
+            let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: context)
+            guard key.publicKey.x963Representation == publicKey else { throw SignerError.keyUnusable }
+            return try key.signature(for: message).rawRepresentation
+        } catch let error as SignerError {
+            throw error
+        } catch {
+            throw SignerError.notAuthenticated
+        }
+    }
+}
+#else
 /// A P-256 key generated inside the Secure Enclave. It cannot be exported,
 /// and every signature needs Face ID or Touch ID by a currently enrolled
 /// face or finger: enrolling a new one invalidates the key.
@@ -157,6 +225,8 @@ public struct SecureEnclaveSigner: ApprovalSigner {
     }
 }
 
+#endif
+
 #if targetEnvironment(simulator) || os(macOS)
 /// A software key, for the Simulator (which cannot make biometry-bound
 /// Secure Enclave keys) and for tests. NOT a substitute for the real thing:
@@ -188,8 +258,12 @@ public struct SoftwareSigner: ApprovalSigner {
             // Face ID or Touch ID if enrolled, else the passcode. With
             // neither set up (a fresh Simulator) there is nothing to ask
             // for; the UI already labels this key as unprotected.
-            let policy: LAPolicy? = [.deviceOwnerAuthenticationWithBiometrics, .deviceOwnerAuthentication]
-                .first { context.canEvaluatePolicy($0, error: nil) }
+            #if os(watchOS)
+            let candidates: [LAPolicy] = [.deviceOwnerAuthenticationWithWristDetection]
+            #else
+            let candidates: [LAPolicy] = [.deviceOwnerAuthenticationWithBiometrics, .deviceOwnerAuthentication]
+            #endif
+            let policy: LAPolicy? = candidates.first { context.canEvaluatePolicy($0, error: nil) }
             if let policy {
                 do {
                     guard try await context.evaluatePolicy(policy, localizedReason: prompt) else {

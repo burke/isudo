@@ -21,6 +21,31 @@ enum Notifications {
         UNUserNotificationCenter.current().setNotificationCategories([category])
     }
 
+    /// The request a notification is about, if it is one of ours.
+    static func requestID(in userInfo: [AnyHashable: Any]) -> String? {
+        (userInfo["isudo"] as? [String: Any])?["r"] as? String
+    }
+
+    /// Whether a push says a request has been answered, and which.
+    static func settledRequestID(in userInfo: [AnyHashable: Any]) -> String? {
+        guard let fields = userInfo["isudo"] as? [String: Any], fields["done"] as? Bool == true else { return nil }
+        return fields["r"] as? String
+    }
+
+    /// Takes down the notification about a request that has been answered.
+    /// Clearing it here clears it on the watch too, where it was mirrored.
+    static func clear(requestID: String) {
+        let center = UNUserNotificationCenter.current()
+        Task {
+            let stale = await center.deliveredNotifications()
+                .filter { Self.requestID(in: $0.request.content.userInfo) == requestID }
+                .map(\.request.identifier)
+            if !stale.isEmpty {
+                center.removeDeliveredNotifications(withIdentifiers: stale)
+            }
+        }
+    }
+
     @MainActor
     static func requestPermission() {
         Task {
@@ -50,6 +75,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         // Without push the app still works whenever it is open.
+    }
+
+    /// A quiet push: the relay saying a request has been answered, here or
+    /// on the watch, so that nothing goes on asking about it.
+    func application(
+        _ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]
+    ) async -> UIBackgroundFetchResult {
+        guard let requestID = Notifications.settledRequestID(in: userInfo) else { return .noData }
+        await MainActor.run { Self.model?.settled(requestID: requestID) }
+        Notifications.clear(requestID: requestID)
+        return .newData
     }
 
     /// A push arrived while the app is in front: the card is about to

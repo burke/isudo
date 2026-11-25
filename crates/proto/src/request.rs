@@ -16,6 +16,7 @@
 //! cwd          bytes working directory the command will run in
 //! exe          bytes absolute path that will be exec'd
 //! flags        u8    bit 0: exe or its directory is writable by a non-root user
+//!                    bit 1: the host will accept a delegate's approval of this request
 //! stdin        u8    what the command's standard input is attached to
 //! argv         u32 count, then bytes each
 //! env          u32 count, then (u8 origin, bytes name, bytes value) each:
@@ -38,7 +39,14 @@ pub const MAX_ANCESTRY: usize = 16;
 /// The executable, or the directory holding it, can be modified by a user
 /// other than root. Approving the argv says little about what will run.
 pub const FLAG_EXE_WRITABLE: u8 = 0x01;
-const KNOWN_FLAGS: u8 = FLAG_EXE_WRITABLE;
+/// The host will accept a delegate's approval of this request.
+///
+/// Its configuration allows delegates, and the request is
+/// [`simple_enough`](crate::delegation::simple_enough). Set by the host,
+/// inside the request it signs, so a delegate shows an Approve control for
+/// exactly the requests the host will honour it on.
+pub const FLAG_DELEGABLE: u8 = 0x02;
+const KNOWN_FLAGS: u8 = FLAG_EXE_WRITABLE | FLAG_DELEGABLE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdinKind {
@@ -349,8 +357,12 @@ mod tests {
 
         let good = sample().encode().unwrap();
         let mut bad = good.clone();
-        bad[FLAGS_AT] = 0x02;
+        bad[FLAGS_AT] = 0x04;
         assert_eq!(Request::decode(&bad), Err(WireError::Invalid("flags")));
+        // Both defined bits decode.
+        let mut both = sample().encode().unwrap();
+        both[FLAGS_AT] = FLAG_EXE_WRITABLE | FLAG_DELEGABLE;
+        assert_eq!(Request::decode(&both).unwrap().flags, 0x03);
         let mut bad = good;
         bad[FLAGS_AT + 1] = 9;
         assert_eq!(Request::decode(&bad), Err(WireError::Invalid("stdin kind")));
@@ -427,7 +439,7 @@ mod tests {
                 host: self.bytes(20),
                 cwd: self.bytes(60),
                 exe: self.bytes(60),
-                flags: u8::try_from(self.below(2)).unwrap(),
+                flags: u8::try_from(self.below(4)).unwrap(),
                 stdin: StdinKind::from_code(u8::try_from(self.below(6)).unwrap()).unwrap(),
                 argv: (0..self.below(6)).map(|_| self.bytes(40)).collect(),
                 env: (0..self.below(4))

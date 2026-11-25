@@ -10,8 +10,8 @@ use std::fmt;
 use std::time::Duration;
 
 use isudo_proto::api::{
-    Ack, Answer, Claim, ClaimView, Confirm, CreatePairing, DeviceUpdate, PairingStatus, PendingList, Revoke,
-    SubmitRequest,
+    Ack, AddDelegate, Answer, Claim, ClaimView, Confirm, CreatePairing, DelegateList, DeviceUpdate, PairingStatus,
+    PendingList, RemoveDelegate, Revoke, SubmitRequest,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -188,6 +188,36 @@ impl Relay {
     /// Fails if the relay cannot be reached or does not recognize the token.
     pub fn update_device(&self, pairing_id: &str, phone_token: &str, body: &DeviceUpdate) -> Result<(), RelayError> {
         done(&self.post(&["v1", "pairings", pairing_id, "device"], Some(phone_token), body)?)
+    }
+
+    /// Phone: registers a delegate it has signed for.
+    ///
+    /// # Errors
+    /// Fails if the relay cannot be reached or rejects the delegation.
+    pub fn add_delegate(&self, pairing_id: &str, phone_token: &str, body: &AddDelegate) -> Result<(), RelayError> {
+        done(&self.post(&["v1", "pairings", pairing_id, "delegates"], Some(phone_token), body)?)
+    }
+
+    /// Phone: removes a delegate.
+    ///
+    /// # Errors
+    /// Fails if the relay cannot be reached or does not recognize the token.
+    pub fn remove_delegate(
+        &self,
+        pairing_id: &str,
+        phone_token: &str,
+        body: &RemoveDelegate,
+    ) -> Result<(), RelayError> {
+        done(&self.post(&["v1", "pairings", pairing_id, "delegates", "remove"], Some(phone_token), body)?)
+    }
+
+    /// Helper: the delegations registered for a pairing. Each is checked
+    /// against the phone's key before use; the relay's word is not enough.
+    ///
+    /// # Errors
+    /// Fails if the relay cannot be reached or does not know the pairing.
+    pub fn delegations(&self, pairing_id: &str) -> Result<DelegateList, RelayError> {
+        json(self.get(&["v1", "pairings", pairing_id, "delegates"], None, REQUEST_TIMEOUT)?)
     }
 
     /// Host: deletes a pairing.

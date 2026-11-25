@@ -25,7 +25,10 @@ struct IsudoApp: App {
                 .environment(model)
                 .preferredColorScheme(appearance)
                 .onOpenURL { model.handle(url: $0) }
-                .onAppear { AppDelegate.model = model }
+                .onAppear {
+                    AppDelegate.model = model
+                    model.startWatchLink()
+                }
                 .onChange(of: scenePhase, initial: true) { _, phase in
                     if phase == .active {
                         model.startPolling()

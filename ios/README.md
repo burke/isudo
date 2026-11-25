@@ -45,6 +45,53 @@ or signing will fail.
 
 The app icon is drawn by `tools/make-icon.swift`.
 
+## Apple Watch
+
+`Watch/` is the watch app. It is embedded in the phone app, so installing
+the phone app on a phone with a paired watch installs it too; its bundle
+identifier is yours with `.watch` on the end. To run it alone in a watch
+Simulator, use the `IsudoWatch` scheme. It takes the same `-fixture`
+argument (`simple`, `longer`, `phone-only`, `approved`, `status`, `empty`).
+
+To use it:
+
+1. On the computer: `sudo isudo-admin watch on`.
+2. Open isudo on the watch and leave it open.
+3. On the phone: open the computer's page in isudo, tap Allow Apple Watch,
+   and confirm with Face ID.
+
+The watch needs a passcode, with wrist detection on. Its key is made in its
+Secure Enclave, exists only while the watch has a passcode, and signs only
+when the system says the watch has stayed on the wrist since it was
+unlocked.
+
+What the watch does is in `IsudoKit` (`Delegation.swift`,
+`WatchMessage.swift`) and tested there against the Rust reference: the
+format of the phone's authorisation, the rule for what a watch may approve,
+every check before a request is shown, and the messages between phone and
+watch.
+
+`./e2e-watch.sh` runs the whole thing in a phone Simulator and its paired
+watch Simulator, against a local relay and a development build of isudo:
+the phone authorises the watch, the watch approves one request by holding
+its button and denies another that only the phone could approve.
+
+**Not yet tried on a real watch.** That run passes, but a Simulator has no
+wrist, no passcode and no Secure Enclave policy, and its notifications do
+not come from Apple. These depend on how watchOS behaves on a
+wrist, and each has a fallback:
+
+| Unknown | If it does not work as hoped |
+|---|---|
+| Whether the Secure Enclave key can be bound to wrist detection, beyond the check the app asks the system for before signing | The key is still usable only while the watch is unlocked; presence then rests on that check |
+| Whether a request can be approved from inside its notification | Tapping the notification opens the app on the same request |
+| Whether the relay's push, mirrored from the phone, reaches the watch with the sealed request still in it | The app fetches it from the relay when opened |
+| Whether the watch can reach a relay on a private network such as a tailnet | Answers go through the phone, which only carries them; the watch must be near the phone |
+| Whether clearing the notification on the phone clears it on the watch | The phone also tells the watch directly; a stale notification shows the request as expired or answered |
+
+Away from the phone the watch gets no notifications in this version: they
+are mirrored from the phone.
+
 In the Simulator the signing key is a software key, because the Simulator
 cannot make Secure Enclave keys bound to biometry. The app says so wherever
 that pairing is shown. Device builds do not contain the software key at all:

@@ -119,5 +119,36 @@ public enum API {
         public var decision: Decision
         public var sig: String
         public var reason: String?
+        /// Present when a watch answered: its encoded delegation. The relay
+        /// fills this in, and the computer checks it; a device sending an
+        /// answer leaves it out.
+        public var delegation: String? = nil
+    }
+
+    /// Phone: registers a watch it has authorised.
+    public struct AddDelegate: Codable, Equatable, Sendable {
+        /// An encoded `SignedDelegation`, base64url.
+        public var delegation: String
+        /// Bearer token the watch will use.
+        public var delegateToken: String
+
+        public init(delegation: String, delegateToken: String) {
+            self.delegation = delegation
+            self.delegateToken = delegateToken
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case delegation
+            case delegateToken = "delegate_token"
+        }
+    }
+
+    public struct RemoveDelegate: Codable, Equatable, Sendable {
+        /// The watch's signing key, base64url.
+        public var delegate: String
+
+        public init(delegate: String) {
+            self.delegate = delegate
+        }
     }
 }

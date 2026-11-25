@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod codec;
+pub mod delegation;
 pub mod envrisk;
 pub mod frame;
 pub mod request;

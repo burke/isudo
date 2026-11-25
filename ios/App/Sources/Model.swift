@@ -74,6 +74,21 @@ enum PairingFlow: Equatable {
     case paired(hostName: String, hardwareBacked: Bool)
 }
 
+/// A watch this phone has authorised to answer for one pairing.
+struct WatchGrant: Codable, Equatable {
+    var pairingID: Data
+    var signPub: Data
+    var name: String
+    /// When the authorisation runs out, in unix seconds.
+    var notAfter: UInt64
+}
+
+/// Where authorising a watch has got to, for one pairing.
+enum WatchSetup: Equatable {
+    case working
+    case failed(String)
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -85,6 +100,12 @@ final class AppModel {
     var notice: String?
     /// True when showing built-in sample data (debug builds only).
     private(set) var isFixture = false
+
+    /// Watches this phone has authorised, one per pairing at most.
+    private(set) var watchGrants: [WatchGrant] = []
+    /// Progress or failure of authorising a watch, by pairing.
+    private(set) var watchSetup: [Data: WatchSetup] = [:]
+    private var watchLink: WatchLink?
 
     private let secrets: any SecretStore
     private let storage: Storage
@@ -103,6 +124,7 @@ final class AppModel {
         self.storage = storage
         pairings = storage.loadPairings()
         activity = storage.loadActivity()
+        watchGrants = storage.loadWatchGrants()
     }
 
     #if DEBUG
@@ -131,6 +153,7 @@ final class AppModel {
         guard !isFixture else { return }
         storage.save(pairings: pairings)
         storage.save(activity: activity)
+        storage.save(watchGrants: watchGrants)
     }
 
     private func record(_ outcome: ActivityEntry.Outcome, _ item: WaitingRequest, reason: String? = nil) {
@@ -442,7 +465,155 @@ final class AppModel {
         PairingSecrets.delete(pairingIDHex: Codec.hexEncode(id), from: secrets)
         pairings.removeAll { $0.pairingID == id }
         waiting.removeAll { $0.pairingID == id }
+        if watchGrants.contains(where: { $0.pairingID == id }) {
+            watchGrants.removeAll { $0.pairingID == id }
+            watchLink?.tell(.removed(pairingID: id))
+        }
+        watchSetup[id] = nil
         save()
+    }
+
+    // MARK: Apple Watch
+
+    /// Starts listening to this phone's watch. Sample data talks to nobody.
+    func startWatchLink() {
+        guard !isFixture, watchLink == nil else { return }
+        watchLink = WatchLink { [weak self] message in
+            await self?.fromWatch(message)
+        }
+    }
+
+    /// Whether this phone has a watch with the isudo app on it.
+    var hasWatchApp: Bool { watchLink?.hasWatchApp ?? false }
+
+    func watchGrant(_ pairingID: Data) -> WatchGrant? {
+        watchGrants.first { $0.pairingID == pairingID }
+    }
+
+    /// Authorises this phone's watch to answer for a pairing, or renews it.
+    ///
+    /// The watch makes its own keys and sends only their public halves. The
+    /// phone signs for them behind Face ID, like an approval, because that
+    /// is what it is: a standing permission for a second device to approve
+    /// simple requests. Whether the computer honours it is up to root there.
+    func allowWatch(_ pairingID: Data) async {
+        guard !isFixture, let pairing = pairing(pairingID), pairing.active, let link = watchLink else { return }
+        watchSetup[pairingID] = .working
+        func fail(_ why: String) {
+            watchSetup[pairingID] = .failed(why)
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        }
+        let reply: WatchMessage
+        do {
+            reply = try await link.ask(.offer(
+                pairingID: pairingID, hostPub: pairing.hostPub, hostName: pairing.hostName, relayURL: pairing.relayURL
+            ))
+        } catch {
+            fail("Open isudo on your Apple Watch, keep it nearby, and try again.")
+            return
+        }
+        guard case .keys(pairingID, let signPub, let kemPub, let watchToken, let rawName, _) = reply else {
+            fail(reply == .failed(.noKey)
+                ? "Your Apple Watch could not make a key. It needs a passcode, with wrist detection on."
+                : "Your Apple Watch did not answer as expected. Update isudo on both devices.")
+            return
+        }
+        let name = Delegation.usableName(from: rawName)
+        let signed: SignedDelegation
+        do {
+            let signer = try Signers.load(
+                pairingIDHex: pairing.idHex, from: secrets, publicKey: pairing.signPub, hardwareBacked: pairing.hardwareBacked
+            )
+            signed = try await pairing.delegate(
+                watchSignPub: signPub, watchKemPub: kemPub, name: name, now: now(), signer: signer,
+                prompt: "Allow \(name) to approve simple requests for \(pairing.hostName)"
+            )
+        } catch {
+            fail("Not allowed: Face ID did not complete.")
+            return
+        }
+        guard let encoded = signed.encode() else {
+            fail("The authorisation could not be made.")
+            return
+        }
+        do {
+            let relay = try RelayClient(baseURL: pairing.relayURL)
+            let token = try PairingSecrets.token(pairingIDHex: pairing.idHex, from: secrets)
+            let body = API.AddDelegate(delegation: Codec.b64Encode(encoded), delegateToken: watchToken)
+            try await relay.addDelegate(pairingID: pairing.idHex, token: token, body)
+        } catch {
+            let why = (error as? RelayError)?.message ?? "The relay could not be told."
+            fail(why + " Your Apple Watch was not set up.")
+            return
+        }
+        // Sent both ways: at once if the watch is still listening, and in
+        // the queue it reads when its app next runs.
+        let message = WatchMessage.delegation(pairingID: pairingID, signed: encoded)
+        link.tell(message)
+        _ = try? await link.ask(message)
+        watchGrants.removeAll { $0.pairingID == pairingID }
+        watchGrants.append(WatchGrant(pairingID: pairingID, signPub: signPub, name: name, notAfter: signed.delegation.notAfter))
+        watchSetup[pairingID] = nil
+        save()
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    /// Stops the watch answering for a pairing: the relay stops serving it
+    /// and the watch forgets its keys.
+    ///
+    /// The computer would still honour that watch's signature until the
+    /// authorisation runs out. If the watch is lost rather than merely
+    /// unwanted, turn the watch off on the computer (`sudo isudo-admin watch
+    /// off`), which takes effect at once.
+    func removeWatch(_ pairingID: Data) async {
+        guard let grant = watchGrant(pairingID), let pairing = pairing(pairingID) else { return }
+        if let relay = try? RelayClient(baseURL: pairing.relayURL),
+           let token = try? PairingSecrets.token(pairingIDHex: pairing.idHex, from: secrets) {
+            let body = API.RemoveDelegate(delegate: Codec.b64Encode(grant.signPub))
+            try? await relay.removeDelegate(pairingID: pairing.idHex, token: token, body)
+        }
+        watchLink?.tell(.removed(pairingID: pairingID))
+        watchGrants.removeAll { $0.pairingID == pairingID }
+        watchSetup[pairingID] = nil
+        save()
+    }
+
+    /// Something the watch sent. The only thing it can ask of the phone is
+    /// to carry an answer, already signed by the watch, to the relay.
+    private func fromWatch(_ message: WatchMessage) async -> WatchMessage? {
+        switch message {
+        case .answer(let pairingID, let requestID, let token, let body):
+            guard let pairing = pairing(pairingID) else { return .failed(.unknownPairing) }
+            guard let answer = try? JSONDecoder().decode(API.Answer.self, from: body),
+                  let relay = try? RelayClient(baseURL: pairing.relayURL)
+            else { return .failed(.malformed) }
+            do {
+                try await relay.answer(requestID: requestID, token: token, answer)
+            } catch RelayError.status(let status) {
+                return .delivered(status: status)
+            } catch {
+                return .delivered(status: 0)
+            }
+            settled(requestID: requestID)
+            return .delivered(status: 204)
+        case .settled(let requestID):
+            settled(requestID: requestID)
+            return nil
+        case .offer, .keys, .delegation, .removed, .delivered, .failed:
+            return .failed(.malformed)
+        }
+    }
+
+    /// A request was answered, here or on the watch. Its card and its
+    /// notification have nothing left to say.
+    func settled(requestID: String) {
+        waiting.removeAll { item in
+            guard item.card.requestIDHex == requestID else { return false }
+            // A card this phone is in the middle of answering finishes itself.
+            if case .waiting = item.phase { return true }
+            return false
+        }
+        Notifications.clear(requestID: requestID)
     }
 
     func unpair(_ id: Data) async {
@@ -555,6 +726,9 @@ final class AppModel {
 
     private func finish(_ item: WaitingRequest, _ outcome: ActivityEntry.Outcome, reason: String?) async {
         setPhase(item.id, .finished(outcome))
+        // The watch may be showing the same request.
+        watchLink?.tell(.settled(requestID: item.card.requestIDHex))
+        Notifications.clear(requestID: item.card.requestIDHex)
         UINotificationFeedbackGenerator().notificationOccurred(outcome == .approved ? .success : .warning)
         record(outcome, item, reason: reason)
         try? await Task.sleep(for: .seconds(1.1))
@@ -589,6 +763,8 @@ struct Storage {
 
     func loadPairings() -> [Pairing] { load("pairings.json", default: []) }
     func loadActivity() -> [ActivityEntry] { load("activity.json", default: []) }
+    func loadWatchGrants() -> [WatchGrant] { load("watch.json", default: []) }
+    func save(watchGrants: [WatchGrant]) { save(watchGrants, as: "watch.json") }
     func save(pairings: [Pairing]) { save(pairings, as: "pairings.json") }
     func save(activity: [ActivityEntry]) { save(activity, as: "activity.json") }
 }

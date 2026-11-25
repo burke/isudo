@@ -114,7 +114,7 @@ fn confirm_code(accepted: &Accepted) -> Result<Pinned, String> {
 
 /// Writes the pairing file so that it is never observable half-written or
 /// with loose permissions.
-fn write_pairing(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_pairing(path: &Path, text: &str) -> Result<(), String> {
     let failed = |what: &str, e: std::io::Error| format!("cannot {what} {}: {e}", path.display());
     if let Some(directory) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::DirBuilder::new()
@@ -188,6 +188,8 @@ pub(crate) fn run(options: &Options) -> Result<(), String> {
             Some(text) => text.parse().map_err(|e| format!("--timeout: {e}"))?,
         },
         secure_path: options.secure_path.clone().unwrap_or_else(|| DEFAULT_SECURE_PATH.to_owned()),
+        // A watch is something root turns on afterwards: `isudo-admin watch on`.
+        watch: false,
     };
     let _checked = config::parse(config::render(&pairing)?.as_bytes())?;
 

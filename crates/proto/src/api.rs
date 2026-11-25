@@ -16,10 +16,21 @@
 //! POST /v1/pairings/{pid}/device            DeviceUpdate      phone, bearer
 //! POST /v1/pairings/{pid}/revoke            Revoke            host
 //! POST /v1/pairings/{pid}/unpair            (empty)           phone, bearer
-//! GET  /v1/pairings/{pid}/requests          -> PendingList    phone, bearer
+//! POST /v1/pairings/{pid}/delegates         AddDelegate       phone, bearer
+//! POST /v1/pairings/{pid}/delegates/remove  RemoveDelegate    phone, bearer
+//! GET  /v1/pairings/{pid}/delegates         -> DelegateList   helper
+//! GET  /v1/pairings/{pid}/requests          -> PendingList    phone or delegate, bearer
 //! POST /v1/requests                         SubmitRequest     helper
 //! GET  /v1/requests/{rid}/response?wait=N   -> Answer         helper (204 until answered)
-//! POST /v1/requests/{rid}/response          Answer            phone, bearer
+//! POST /v1/requests/{rid}/response          Answer            phone or delegate, bearer
+//! ```
+//!
+//! A delegate is a second device (a watch) that the phone has authorised:
+//! see `isudo_proto::delegation`. It has its own bearer token and its own
+//! decryption key. `GET .../requests` gives each bearer the envelope sealed
+//! to it.
+//!
+//! ```text
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -120,6 +131,39 @@ pub struct SubmitRequest {
     /// HPKE encapsulated key followed by the ciphertext of
     /// `host_sig || request`. Opaque to the relay.
     pub envelope: String,
+    /// The same plaintext sealed to each delegate the helper found.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegate_envelopes: Vec<DelegateEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegateEnvelope {
+    /// The delegate's signing key, which is how a delegate is named.
+    pub delegate: String,
+    pub envelope: String,
+}
+
+/// Phone: registers a device it has authorised.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddDelegate {
+    /// An encoded `SignedDelegation`: the delegate's keys under the phone's
+    /// signature.
+    pub delegation: String,
+    /// Bearer token the delegate will use.
+    pub delegate_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveDelegate {
+    /// The delegate's signing key.
+    pub delegate: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegateList {
+    /// Encoded `SignedDelegation`s. The relay is not believed about them:
+    /// each carries the phone's signature.
+    pub delegations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,10 +188,16 @@ pub enum Decision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Answer {
     pub decision: Decision,
-    /// Phone signature over `sigs::approve_msg` or `sigs::deny_msg`.
+    /// Signature over `sigs::approve_msg` or `sigs::deny_msg`: the phone's,
+    /// or a delegate's if `delegation` is present.
     pub sig: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Present when a delegate answered: its encoded `SignedDelegation`.
+    /// The relay fills this in from what the phone registered; the host
+    /// checks it against the phone key it pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -126,6 +126,19 @@ public struct RelayClient: Sendable {
         try await done("POST", ["v1", "pairings", pairingID, "unpair"], bearer: token, body: String?.none)
     }
 
+    /// Registers a watch this phone has authorised, or renews it.
+    public func addDelegate(pairingID: String, token: String, _ body: API.AddDelegate) async throws(RelayError) {
+        try await done("POST", ["v1", "pairings", pairingID, "delegates"], bearer: token, body: body)
+    }
+
+    /// Stops the relay serving a watch. The computer honours the watch's
+    /// delegation until it runs out, or until root turns the watch off.
+    public func removeDelegate(pairingID: String, token: String, _ body: API.RemoveDelegate) async throws(RelayError) {
+        try await done("POST", ["v1", "pairings", pairingID, "delegates", "remove"], bearer: token, body: body)
+    }
+
+    /// For the phone, or for a watch with its own token: each is handed the
+    /// envelopes sealed to it.
     public func pending(pairingID: String, token: String) async throws(RelayError) -> API.PendingList {
         try await json(["v1", "pairings", pairingID, "requests"], bearer: token)
     }

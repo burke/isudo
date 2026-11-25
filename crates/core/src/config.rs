@@ -42,6 +42,11 @@ pub struct Pairing {
     pub timeout_secs: u32,
     /// Directories searched for commands, and the command's PATH.
     pub secure_path: String,
+    /// Whether a watch the phone has authorised may answer. Off unless root
+    /// turns it on: a watch cannot check a face, so its approval says less
+    /// than the phone's about who gave it. Even when on, a watch may approve
+    /// only requests simple enough to read on it.
+    pub watch: bool,
 }
 
 /// The raw `key = value` pairs of a pairing file, each at most once.
@@ -57,6 +62,7 @@ struct Fields<'a> {
     phone_name: Option<&'a str>,
     timeout_secs: Option<&'a str>,
     secure_path: Option<&'a str>,
+    watch: Option<&'a str>,
 }
 
 impl<'a> Fields<'a> {
@@ -81,6 +87,7 @@ impl<'a> Fields<'a> {
                 "phone_name" => &mut fields.phone_name,
                 "timeout_secs" => &mut fields.timeout_secs,
                 "secure_path" => &mut fields.secure_path,
+                "watch" => &mut fields.watch,
                 _ => return Err(at(&format!("unknown key \"{key}\""))),
             };
             if slot.replace(value).is_some() {
@@ -133,6 +140,7 @@ pub fn render(pairing: &Pairing) -> Result<String, String> {
         &format!("phone_name = {}\n", pairing.phone_name),
         &format!("timeout_secs = {}\n", pairing.timeout_secs),
         &format!("secure_path = {}\n", pairing.secure_path),
+        &format!("watch = {}\n", if pairing.watch { "yes" } else { "no" }),
     ]
     .concat())
 }
@@ -166,6 +174,11 @@ pub fn parse(text: &[u8]) -> Result<Pairing, String> {
         return Err("\"secure_path\" must be a colon-separated list of absolute directories".into());
     }
 
+    let watch = match fields.watch {
+        None | Some("no") => false,
+        Some("yes") => true,
+        Some(_) => return Err("\"watch\" must be yes or no".into()),
+    };
     let relay_url = required(fields.relay_url, "relay_url")?;
     if !(relay_url.starts_with("https://") || relay_url.starts_with("http://")) {
         return Err("\"relay_url\" must start with https://".into());
@@ -181,6 +194,7 @@ pub fn parse(text: &[u8]) -> Result<Pairing, String> {
         phone_name: required(fields.phone_name, "phone_name")?.to_owned(),
         timeout_secs,
         secure_path: secure_path.to_owned(),
+        watch,
     })
 }
 
@@ -238,9 +252,20 @@ mod tests {
             phone_name: "Burke\u{2019}s iPhone # 2".into(),
             timeout_secs: 90,
             secure_path: "/usr/local/bin:/usr/bin".into(),
+            watch: true,
         };
         let text = render(&pairing).unwrap();
         assert_eq!(parse(text.as_bytes()).unwrap(), pairing);
+    }
+
+    #[test]
+    fn the_watch_is_off_unless_the_file_says_yes() {
+        assert!(!parse(sample().as_bytes()).unwrap().watch, "a file from before the setting existed");
+        assert!(parse(format!("{}watch = yes\n", sample()).as_bytes()).unwrap().watch);
+        assert!(!parse(format!("{}watch = no\n", sample()).as_bytes()).unwrap().watch);
+        for odd in ["true", "YES", "1", "", "on"] {
+            assert!(parse(format!("{}watch = {odd}\n", sample()).as_bytes()).is_err(), "{odd:?}");
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use isudo_proto::codec::b64_encode;
-use isudo_relay_core::Push;
+use isudo_relay_core::{Device, Push, Settled};
 use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature, SigningKey};
 use p256::pkcs8::DecodePrivateKey as _;
@@ -81,13 +81,18 @@ impl Apns {
         [signing_input.as_str(), ".", &b64_encode(&signature.to_bytes())].concat()
     }
 
-    /// Sends one push. Returns a short description of any failure, for the log.
-    pub(crate) async fn send(&self, push: &Push, now: u64) -> Result<(), String> {
-        let host =
-            if push.device.apns_env == "production" { "api.push.apple.com" } else { "api.sandbox.push.apple.com" };
-        let url = ["https://", host, "/3/device/", &push.device.apns_token].concat();
+    /// What the app receives for a waiting request.
+    ///
+    /// The request itself is never in the clear here. If the pairing has a
+    /// watch and the request is small, it rides along sealed to the watch,
+    /// so that a watch handed this notification can show it at once.
+    fn waiting_payload(push: &Push) -> serde_json::Value {
         let body = [push.host_name.as_str(), " wants to run a command as root"].concat();
-        let payload = json!({
+        let mut isudo = json!({ "p": push.pairing_id, "r": push.request_id, "x": push.expires_at });
+        if let (Some(envelope), Some(fields)) = (&push.delegate_envelope, isudo.as_object_mut()) {
+            let _ = fields.insert("w".to_owned(), json!(envelope));
+        }
+        json!({
             "aps": {
                 "alert": { "title": "Approval requested", "body": body },
                 "sound": "default",
@@ -95,27 +100,62 @@ impl Apns {
                 "category": "ISUDO_REQUEST",
                 "thread-id": push.pairing_id,
             },
-            "isudo": { "p": push.pairing_id, "r": push.request_id },
+            "isudo": isudo,
+        })
+    }
+
+    /// Sends the push for a waiting request. Returns a short description of
+    /// any failure, for the log.
+    pub(crate) async fn send(&self, push: &Push, now: u64) -> Result<(), String> {
+        let headers = [
+            ("apns-push-type", "alert".to_owned()),
+            ("apns-priority", "10".to_owned()),
+            ("apns-expiration", push.expires_at.to_string()),
+            ("apns-collapse-id", push.request_id.clone()),
+        ];
+        self.post(&push.device, &headers, &Self::waiting_payload(push), now).await
+    }
+
+    /// Tells the app, without alerting anyone, that a request has been
+    /// answered, so it can clear the notification wherever it still shows.
+    /// Best effort: the system may delay or drop a background push, and a
+    /// stale notification is harmless (the computer has stopped waiting).
+    pub(crate) async fn send_settled(&self, settled: &Settled, now: u64) -> Result<(), String> {
+        let payload = json!({
+            "aps": { "content-available": 1 },
+            "isudo": { "p": settled.pairing_id, "r": settled.request_id, "done": true },
         });
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(self.provider_token(now).await)
-            .header("apns-topic", &self.topic)
-            .header("apns-push-type", "alert")
-            .header("apns-priority", "10")
-            .header("apns-expiration", push.expires_at.to_string())
-            .header("apns-collapse-id", &push.request_id)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| format!("request failed: {e}"))?;
+        let headers = [
+            ("apns-push-type", "background".to_owned()),
+            ("apns-priority", "5".to_owned()),
+            ("apns-expiration", now.saturating_add(120).to_string()),
+        ];
+        self.post(&settled.device, &headers, &payload, now).await
+    }
+
+    async fn post(
+        &self,
+        device: &Device,
+        headers: &[(&str, String)],
+        payload: &serde_json::Value,
+        now: u64,
+    ) -> Result<(), String> {
+        let host = if device.apns_env == "production" { "api.push.apple.com" } else { "api.sandbox.push.apple.com" };
+        let url = ["https://", host, "/3/device/", &device.apns_token].concat();
+        let mut request =
+            self.client.post(url).bearer_auth(self.provider_token(now).await).header("apns-topic", &self.topic);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        let response = request.json(payload).send().await.map_err(|e| format!("request failed: {e}"))?;
         let status = response.status();
         if status.is_success() {
             return Ok(());
         }
         let reason = response.text().await.unwrap_or_default();
-        Err(format!("APNs answered {status}: {}", reason.chars().take(200).collect::<String>()))
+        // One line, whatever Apple sent.
+        let reason: String = reason.chars().take(200).map(|c| if c.is_control() { ' ' } else { c }).collect();
+        Err(format!("APNs answered {status}: {reason}"))
     }
 }
 
@@ -162,5 +202,34 @@ mod tests {
         let first = apns.provider_token(1000).await;
         assert_eq!(apns.provider_token(1000 + TOKEN_LIFETIME_SECS - 1).await, first);
         assert_ne!(apns.provider_token(1000 + TOKEN_LIFETIME_SECS).await, first);
+    }
+
+    fn push(delegate_envelope: Option<&str>) -> Push {
+        Push {
+            device: Device { apns_token: "ab".repeat(32), apns_env: "sandbox".into() },
+            pairing_id: "a1".repeat(16),
+            request_id: "b2".repeat(16),
+            host_name: "burke-mbp".into(),
+            expires_at: 1_795_000_120,
+            delegate_envelope: delegate_envelope.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_push_names_the_request_and_may_carry_it_sealed_to_a_watch() {
+        let plain = Apns::waiting_payload(&push(None));
+        assert_eq!(plain["isudo"]["r"], "b2".repeat(16));
+        assert_eq!(plain["isudo"]["x"], 1_795_000_120_u64);
+        assert!(plain["isudo"].get("w").is_none());
+        assert_eq!(plain["aps"]["interruption-level"], "time-sensitive");
+
+        let sealed = "A".repeat(isudo_relay_core::MAX_PUSHED_ENVELOPE);
+        let with = Apns::waiting_payload(&push(Some(&sealed)));
+        assert_eq!(with["isudo"]["w"], sealed);
+        // Apple accepts four kilobytes. The largest envelope the relay will
+        // attach, with the longest computer name, stays inside that.
+        let mut longest = push(Some(&sealed));
+        longest.host_name = "x".repeat(64);
+        assert!(Apns::waiting_payload(&longest).to_string().len() < 4096);
     }
 }

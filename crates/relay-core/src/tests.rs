@@ -93,6 +93,7 @@ fn submit_body(request: u8, expires_at: u64) -> SubmitRequest {
         expires_at,
         ticket_sig: host().sign(&sigs::ticket_msg(&PID, &rid, expires_at)),
         envelope: b64_encode(b"opaque ciphertext"),
+        delegate_envelopes: Vec::new(),
     }
 }
 
@@ -101,7 +102,7 @@ fn rid(request: u8) -> String {
 }
 
 fn approve() -> Answer {
-    Answer { decision: Decision::Approve, sig: b64_encode(&[9; SIG_LEN]), reason: None }
+    Answer { decision: Decision::Approve, sig: b64_encode(&[9; SIG_LEN]), reason: None, delegation: None }
 }
 
 #[test]
@@ -117,9 +118,12 @@ fn a_request_flows_from_host_to_phone_and_back() {
     assert_eq!(pending.requests.len(), 1);
     assert_eq!(pending.requests[0].envelope, b64_encode(b"opaque ciphertext"));
 
-    relay.answer(202, &rid(1), &token(), approve()).unwrap();
+    // Answering tells the shell where to send word that it is settled.
+    let settled = relay.answer(202, &rid(1), &token(), approve()).unwrap().unwrap();
+    assert_eq!((settled.device.apns_token.as_str(), settled.request_id), (APNS, rid(1)));
     let answer = relay.poll_answer(203, &rid(1)).unwrap().unwrap();
     assert_eq!(answer.decision, Decision::Approve);
+    assert_eq!(answer.delegation, None, "the phone's own answer carries no delegation");
     // Answered requests no longer show as waiting.
     assert_eq!(relay.pending(203, &pid(), &token()).unwrap().requests.len(), 0);
 }
@@ -262,14 +266,14 @@ fn a_pairing_cannot_flood_the_phone() {
         assert!(relay.submit(200, &submit_body(n, 250)).is_ok());
     }
     assert_eq!(relay.submit(200, &submit_body(4, 250)), Err(Reject::TooMany), "too many waiting");
-    relay.answer(201, &rid(1), &token(), approve()).unwrap();
-    relay.answer(201, &rid(2), &token(), approve()).unwrap();
+    let _settled = relay.answer(201, &rid(1), &token(), approve()).unwrap();
+    let _settled = relay.answer(201, &rid(2), &token(), approve()).unwrap();
     assert!(relay.submit(202, &submit_body(4, 250)).is_ok());
     assert!(relay.submit(202, &submit_body(5, 250)).is_ok());
     assert_eq!(relay.submit(203, &submit_body(6, 250)), Err(Reject::TooMany), "rate limit");
     // The window slides.
-    relay.answer(203, &rid(3), &token(), approve()).unwrap();
-    relay.answer(203, &rid(4), &token(), approve()).unwrap();
+    let _settled = relay.answer(203, &rid(3), &token(), approve()).unwrap();
+    let _settled = relay.answer(203, &rid(4), &token(), approve()).unwrap();
     assert!(relay.submit(262, &submit_body(6, 300)).is_ok());
 }
 
@@ -299,7 +303,7 @@ fn the_first_answer_stands_and_malformed_answers_are_refused() {
     assert_eq!(relay.answer(201, &rid(1), &token(), long), Err(Reject::Invalid));
 
     let deny = Answer { decision: Decision::Deny, reason: Some("use staging".into()), ..approve() };
-    relay.answer(202, &rid(1), &token(), deny).unwrap();
+    let _settled = relay.answer(202, &rid(1), &token(), deny).unwrap();
     assert_eq!(relay.answer(203, &rid(1), &token(), approve()), Err(Reject::Conflict));
     assert_eq!(relay.poll_answer(204, &rid(1)).unwrap().unwrap().decision, Decision::Deny);
     assert_eq!(relay.answer(204, &rid(9), &token(), approve()), Err(Reject::NotFound));
@@ -391,4 +395,235 @@ fn pairings_survive_a_restart_but_tokens_are_not_stored() {
     // Requests are not persisted; new ones work.
     assert_eq!(restored.poll_answer(201, &rid(1)), Err(Reject::NotFound));
     assert!(restored.submit(201, &submit_body(2, 320)).unwrap().is_some());
+}
+
+// ---- Delegates: a watch the phone has authorised --------------------------
+
+use isudo_proto::api::DelegateEnvelope;
+use isudo_proto::delegation::Delegation;
+
+const WATCH_TOKEN: [u8; 32] = [0x71; 32];
+
+fn watch() -> Party {
+    Party::new(40)
+}
+
+/// An authorisation of `delegate` for this pairing, signed by `signer`.
+fn delegation_by(signer: &Party, delegate: &Party, change: impl FnOnce(&mut Delegation)) -> String {
+    let mut delegation = Delegation {
+        pairing_id: PID,
+        sign_pub: delegate.public(),
+        kem_pub: Party::new(41).public(),
+        not_after: 9_999_999_999,
+        name: b"Burke's Apple Watch".to_vec(),
+    };
+    change(&mut delegation);
+    let phone_sig = b64_decode_array(&signer.sign(&delegation.message().unwrap())).unwrap();
+    b64_encode(&SignedDelegation { delegation, phone_sig }.encode().unwrap())
+}
+
+fn add_watch() -> AddDelegate {
+    AddDelegate { delegation: delegation_by(&phone(), &watch(), |_| {}), delegate_token: b64_encode(&WATCH_TOKEN) }
+}
+
+fn watch_token() -> String {
+    b64_encode(&WATCH_TOKEN)
+}
+
+/// A request sealed to the phone and to the watch.
+fn submit_for_both(request: u8, expires_at: u64) -> SubmitRequest {
+    SubmitRequest {
+        delegate_envelopes: vec![DelegateEnvelope {
+            delegate: watch().public_b64(),
+            envelope: b64_encode(b"sealed to the watch"),
+        }],
+        ..submit_body(request, expires_at)
+    }
+}
+
+#[test]
+fn only_the_phone_can_add_a_delegate_and_only_one_it_signed_for() {
+    let mut relay = paired(true);
+    assert_eq!(relay.delegations(&pid()).unwrap().delegations.len(), 0);
+
+    // The wrong bearer: nobody in particular, or the watch itself.
+    assert_eq!(relay.add_delegate(&pid(), &b64_encode(&[0; 32]), &add_watch()), Err(Reject::Unauthorized));
+    assert_eq!(relay.add_delegate(&pid(), &watch_token(), &add_watch()), Err(Reject::Unauthorized));
+    // The phone's bearer, with an authorisation the phone did not sign.
+    for signer in [watch(), host(), Party::new(9)] {
+        let forged = AddDelegate { delegation: delegation_by(&signer, &watch(), |_| {}), ..add_watch() };
+        assert_eq!(relay.add_delegate(&pid(), &token(), &forged), Err(Reject::Unauthorized));
+    }
+    // The phone's genuine authorisation, for some other pairing.
+    let elsewhere = delegation_by(&phone(), &watch(), |d| d.pairing_id = [0xb2; PAIRING_ID_LEN]);
+    let elsewhere = AddDelegate { delegation: elsewhere, ..add_watch() };
+    assert_eq!(relay.add_delegate(&pid(), &token(), &elsewhere), Err(Reject::Unauthorized));
+    // Malformed bodies.
+    for delegation in ["", "not base64!", "AAAA"] {
+        let bad = AddDelegate { delegation: delegation.to_owned(), ..add_watch() };
+        assert_eq!(relay.add_delegate(&pid(), &token(), &bad), Err(Reject::Invalid), "{delegation:?}");
+    }
+    let short_token = AddDelegate { delegate_token: b64_encode(&[1; 16]), ..add_watch() };
+    assert_eq!(relay.add_delegate(&pid(), &token(), &short_token), Err(Reject::Invalid));
+    // A watch may not share the phone's token: the relay tells them apart by it.
+    let same_token = AddDelegate { delegate_token: token(), ..add_watch() };
+    assert_eq!(relay.add_delegate(&pid(), &token(), &same_token), Err(Reject::Invalid));
+    assert_eq!(relay.delegations(&pid()).unwrap().delegations.len(), 0, "none of that registered anything");
+
+    relay.add_delegate(&pid(), &token(), &add_watch()).unwrap();
+    assert_eq!(relay.delegations(&pid()).unwrap().delegations, vec![add_watch().delegation]);
+}
+
+#[test]
+fn a_pairing_must_be_active_to_have_delegates() {
+    let mut relay = Relay::default();
+    relay.create_pairing(100, &create_body(), None).unwrap();
+    relay.claim(101, &pid(), &claim_body(false)).unwrap();
+    assert_eq!(relay.add_delegate(&pid(), &token(), &add_watch()), Err(Reject::Conflict));
+    assert_eq!(relay.delegations(&pid()), Err(Reject::NotFound));
+    assert_eq!(relay.delegations(&hex_encode(&[0xb2; PAIRING_ID_LEN])), Err(Reject::NotFound));
+}
+
+#[test]
+fn a_renewal_replaces_and_the_number_of_delegates_is_bounded() {
+    let mut relay = paired(true);
+    relay.add_delegate(&pid(), &token(), &add_watch()).unwrap();
+    // The same watch, authorised afresh with a later expiry: replaced, not added.
+    let renewed = delegation_by(&phone(), &watch(), |d| d.not_after += 1);
+    let renewed = AddDelegate { delegation: renewed, ..add_watch() };
+    relay.add_delegate(&pid(), &token(), &renewed).unwrap();
+    assert_eq!(relay.delegations(&pid()).unwrap().delegations, vec![renewed.delegation]);
+
+    for (seed, expected) in [(50, Ok(())), (51, Err(Reject::TooMany))] {
+        let another = AddDelegate {
+            delegation: delegation_by(&phone(), &Party::new(seed), |_| {}),
+            delegate_token: b64_encode(&[seed; 32]),
+        };
+        assert_eq!(relay.add_delegate(&pid(), &token(), &another), expected, "watch {seed}");
+    }
+    assert_eq!(relay.delegations(&pid()).unwrap().delegations.len(), MAX_DELEGATES);
+}
+
+#[test]
+fn each_device_is_handed_the_envelope_sealed_to_it() {
+    let mut relay = paired(true);
+    relay.add_delegate(&pid(), &token(), &add_watch()).unwrap();
+    let push = relay.submit(200, &submit_for_both(1, 320)).unwrap().unwrap();
+    // The push carries the watch's envelope, so a watch can show the
+    // request without fetching it.
+    assert_eq!(push.delegate_envelope, Some(b64_encode(b"sealed to the watch")));
+
+    let for_phone = relay.pending(201, &pid(), &token()).unwrap().requests;
+    let for_watch = relay.pending(201, &pid(), &watch_token()).unwrap().requests;
+    assert_eq!(for_phone[0].envelope, b64_encode(b"opaque ciphertext"));
+    assert_eq!(for_watch[0].envelope, b64_encode(b"sealed to the watch"));
+    assert_eq!(for_phone[0].request_id, for_watch[0].request_id);
+
+    // A request that was not sealed to the watch is not offered to it.
+    assert!(relay.submit(201, &submit_body(2, 320)).unwrap().unwrap().delegate_envelope.is_none());
+    assert_eq!(relay.pending(202, &pid(), &token()).unwrap().requests.len(), 2);
+    assert_eq!(relay.pending(202, &pid(), &watch_token()).unwrap().requests.len(), 1);
+}
+
+#[test]
+fn envelopes_for_unknown_delegates_are_dropped_and_bad_ones_refused() {
+    let mut relay = paired(true);
+    relay.add_delegate(&pid(), &token(), &add_watch()).unwrap();
+    // Sealed to a key that is not registered: stored for nobody, pushed to nobody.
+    let mut stray = submit_for_both(1, 320);
+    stray.delegate_envelopes[0].delegate = Party::new(77).public_b64();
+    assert!(relay.submit(200, &stray).unwrap().unwrap().delegate_envelope.is_none());
+    assert_eq!(relay.pending(201, &pid(), &watch_token()).unwrap().requests.len(), 0);
+    // Not base64, or too many.
+    let mut bad = submit_for_both(2, 320);
+    bad.delegate_envelopes[0].envelope = "not base64!".to_owned();
+    assert_eq!(relay.submit(200, &bad), Err(Reject::Invalid));
+    let mut crowd = submit_for_both(3, 320);
+    crowd.delegate_envelopes = vec![crowd.delegate_envelopes[0].clone(); MAX_DELEGATES + 1];
+    assert_eq!(relay.submit(200, &crowd), Err(Reject::Invalid));
+    // Too large to ride in a push: stored for the watch, but it must fetch.
+    let mut large = submit_for_both(4, 320);
+    large.delegate_envelopes[0].envelope = b64_encode(&vec![7; MAX_PUSHED_ENVELOPE]);
+    assert!(relay.submit(200, &large).unwrap().unwrap().delegate_envelope.is_none());
+    assert_eq!(relay.pending(201, &pid(), &watch_token()).unwrap().requests.len(), 1);
+}
+
+#[test]
+fn a_watchs_answer_carries_its_delegation_and_the_first_answer_still_stands() {
+    let mut relay = paired(true);
+    relay.add_delegate(&pid(), &token(), &add_watch()).unwrap();
+    let _push = relay.submit(200, &submit_for_both(1, 320)).unwrap();
+
+    // Whatever the watch puts in the field, the relay attaches the
+    // delegation the phone registered.
+    let mut from_watch = approve();
+    from_watch.delegation = Some("something the watch made up".to_owned());
+    let settled = relay.answer(201, &rid(1), &watch_token(), from_watch).unwrap();
+    assert!(settled.is_some(), "the phone is told, so it can clear its notification");
+    let answer = relay.poll_answer(202, &rid(1)).unwrap().unwrap();
+    assert_eq!(answer.delegation, Some(add_watch().delegation));
+
+    // The phone answering afterwards is too late, and the reverse.
+    assert_eq!(relay.answer(202, &rid(1), &token(), approve()), Err(Reject::Conflict));
+    let _push = relay.submit(203, &submit_for_both(2, 320)).unwrap();
+    let mut from_phone = approve();
+    from_phone.delegation = Some(add_watch().delegation);
+    assert!(relay.answer(204, &rid(2), &token(), from_phone).is_ok());
+    assert_eq!(relay.answer(204, &rid(2), &watch_token(), approve()), Err(Reject::Conflict));
+    // The phone's answer never carries one, even if it tried to.
+    assert_eq!(relay.poll_answer(205, &rid(2)).unwrap().unwrap().delegation, None);
+}
+
+#[test]
+fn a_watch_can_do_nothing_but_read_and_answer_requests() {
+    let mut relay = paired(true);
+    relay.add_delegate(&pid(), &token(), &add_watch()).unwrap();
+    let watch_token = watch_token();
+    // It is not the phone: it cannot read the pairing's state, move the
+    // push address, add or remove delegates, or unpair.
+    assert_eq!(relay.status(&pid(), &watch_token).map(|s| s.state), Err(Reject::Unauthorized));
+    let device = DeviceUpdate { apns_token: APNS.into(), apns_env: "sandbox".into() };
+    assert_eq!(relay.update_device(&pid(), &watch_token, &device), Err(Reject::Unauthorized));
+    let remove = RemoveDelegate { delegate: watch().public_b64() };
+    assert_eq!(relay.remove_delegate(&pid(), &watch_token, &remove), Err(Reject::Unauthorized));
+    assert_eq!(relay.revoke_as_phone(&pid(), &watch_token), Err(Reject::Unauthorized));
+    assert_eq!(relay.status(&pid(), &token()).unwrap().state, PairingState::Active);
+}
+
+#[test]
+fn a_removed_watch_is_no_longer_served() {
+    let mut relay = paired(true);
+    relay.add_delegate(&pid(), &token(), &add_watch()).unwrap();
+    let _push = relay.submit(200, &submit_for_both(1, 320)).unwrap();
+    relay.remove_delegate(&pid(), &token(), &RemoveDelegate { delegate: watch().public_b64() }).unwrap();
+    assert_eq!(relay.pending(201, &pid(), &watch_token()).map(|l| l.requests.len()), Err(Reject::Unauthorized));
+    assert_eq!(relay.answer(201, &rid(1), &watch_token(), approve()), Err(Reject::Unauthorized));
+    assert_eq!(relay.delegations(&pid()).unwrap().delegations.len(), 0);
+    // Removing it again is not an error.
+    relay.remove_delegate(&pid(), &token(), &RemoveDelegate { delegate: watch().public_b64() }).unwrap();
+    // The phone carries on.
+    let _settled = relay.answer(202, &rid(1), &token(), approve()).unwrap();
+}
+
+#[test]
+fn delegates_survive_a_restart_and_older_state_still_loads() {
+    let mut relay = paired(true);
+    relay.add_delegate(&pid(), &token(), &add_watch()).unwrap();
+    let saved = serde_json::to_string(&relay.snapshot()).unwrap();
+    assert!(!saved.contains(&watch_token()), "the watch's token is not stored");
+    let mut restored = Relay::default();
+    restored.restore(serde_json::from_str(&saved).unwrap());
+    assert_eq!(restored.delegations(&pid()).unwrap().delegations, vec![add_watch().delegation]);
+    let _push = restored.submit(200, &submit_for_both(1, 320)).unwrap();
+    assert_eq!(restored.pending(201, &pid(), &watch_token()).unwrap().requests.len(), 1);
+
+    // State written before delegates existed has no such field.
+    let mut older: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    for record in older["pairings"].as_object_mut().unwrap().values_mut() {
+        let _ = record.as_object_mut().unwrap().remove("delegates");
+    }
+    let mut from_older = Relay::default();
+    from_older.restore(serde_json::from_value(older).unwrap());
+    assert_eq!(from_older.delegations(&pid()).unwrap().delegations.len(), 0);
+    assert_eq!(from_older.status(&pid(), &token()).unwrap().state, PairingState::Active);
 }

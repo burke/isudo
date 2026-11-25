@@ -42,7 +42,7 @@ use isudo_proto::wire::WireError;
 use isudo_core::args::{self, Invocation};
 use isudo_core::config::{self, Pairing};
 use isudo_core::env;
-use isudo_core::plan::{Approved, Context, HostKey, PhoneKey, Plan, Proposal, Verdict};
+use isudo_core::plan::{Answerer, Approved, Context, HostKey, PhoneKey, Plan, Proposal, Verdict, WatchRefusal};
 
 use crate::sys::Caller;
 
@@ -181,18 +181,23 @@ fn run() -> Result<i32, Fatal> {
 
     // 4. Ask.
     let phone = escape(pairing.phone_name.as_bytes());
+    // Said so that whoever is waiting knows a glance at the wrist may do.
+    let or_watch = if proposal.watch_may_approve() { " or its watch" } else { "" };
     say(&format!(
-        "waiting for approval on {phone} (up to {}m{:02}s; Ctrl-C to cancel)",
+        "waiting for approval on {phone}{or_watch} (up to {}m{:02}s; Ctrl-C to cancel)",
         pairing.timeout_secs / 60,
         pairing.timeout_secs % 60
     ));
     let outcome = match helper::run(&install.helper, &job, &caller, &caller_env, PRIVILEGED)? {
-        helper::Answer::Outcome(outcome) => outcome,
+        helper::Answer::Outcome(outcome) => *outcome,
         helper::Answer::Nothing(why) => return Err(Fatal::new(["not approved: ", why].concat())),
     };
 
     // 5. Believe only a signature.
-    let approved = require_approval(proposal.judge(&phone_key, outcome), &phone)?;
+    // The clock matters only to a watch's answer, whose authorisation by
+    // the phone runs out. A clock that cannot be read counts as "too late".
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(u64::MAX, |since| since.as_secs());
+    let approved = require_approval(proposal.judge(&phone_key, outcome, now), &phone)?;
 
     // 6. Run, provided the approval is still current.
     Err(exec::run(approved, &saved_core_limit, &expiry, PRIVILEGED))
@@ -275,6 +280,7 @@ fn propose(
         cwd,
         stdin: stdin_kind(),
         ancestry: ancestry::collect(sys::parent_pid()),
+        watch: pairing.watch,
     };
     Proposal::describe(plan, context).map_err(|e| match e {
         WireError::TooLarge(_) => {
@@ -297,6 +303,8 @@ fn job_for(proposal: &Proposal, pairing: &Pairing, host_key: &HostKey) -> Result
         relay_url: pairing.relay_url.clone().into_bytes(),
         pairing_id: pairing.id,
         phone_kem_pub: pairing.phone_kem_pub,
+        phone_sign_pub: pairing.phone_sign_pub,
+        delegates: pairing.watch,
         expires_at,
         timeout_secs: pairing.timeout_secs,
         ticket_sig: host_key.sign(&sigs::ticket_msg(&pairing.id, &request_id, expires_at)),
@@ -309,9 +317,28 @@ fn job_for(proposal: &Proposal, pairing: &Pairing, host_key: &HostKey) -> Result
 fn require_approval(verdict: Verdict, phone: &str) -> Result<Approved, Fatal> {
     match verdict {
         Verdict::Approved(approved) => Ok(approved),
-        Verdict::Denied { reason } if reason.is_empty() => Err(Fatal::new(format!("denied on {phone}"))),
-        Verdict::Denied { reason } => Err(Fatal::new(format!("denied on {phone}: \"{}\"", escape(&reason)))),
+        Verdict::Denied { reason, by } => {
+            // The watch's name is one the phone signed for; escape it anyway.
+            let device = match &by {
+                Answerer::Phone => phone.to_owned(),
+                Answerer::Watch(name) => escape(name),
+            };
+            // Said in full either way, so that a caller reading this (often
+            // an AI agent) cannot take a bare denial for a cut-off message.
+            Err(Fatal::new(if reason.is_empty() {
+                format!("denied on {device} (no reason given)")
+            } else {
+                format!("denied on {device}: \"{}\"", escape(&reason))
+            }))
+        }
         Verdict::Forged => Err(Fatal::new("the answer was not signed by the paired phone; not running")),
+        Verdict::WatchRefused(why) => Err(Fatal::new(match why {
+            WatchRefusal::Off => "a watch answered, but this computer does not accept a watch's answer; not running",
+            WatchRefusal::Expired => {
+                "a watch answered, but the phone's authorisation of it has run out; renew it in the app. Not running"
+            }
+            WatchRefusal::NotSimple => "a watch approved a request that only the phone may approve; not running",
+        })),
         Verdict::NoAnswer(failure) => Err(Fatal::new(format!("not approved: {failure}"))),
     }
 }

@@ -184,6 +184,47 @@ cp $D/saved.conf /etc/isudo/pairing.conf
 OUT=$(as_agent isudo -u nobody id 2>&1); check "other target users are refused" "only runs commands as root" "$OUT"
 OUT=$(as_agent isudo -E id 2>&1); check "passing the whole environment is refused" "preserve-env=NAME" "$OUT"
 
+echo "== a watch the phone authorised"
+# The stand-in watch has keys of its own and the phone's signature over them.
+as_watch() { isudo-devphone watch --state $D/watch.json "$@" --once >$D/wwatch.out 2>&1 & WWATCH=$!; sleep 0.3; }
+OUT=$(as_agent isudo-admin watch on 2>&1); check "only root can turn the watch on" "must be run as root" "$OUT"
+OUT=$(isudo-devphone add-watch $D/watch.json --state $D/phone.json --name "Test Watch" 2>&1)
+check "the phone authorises a watch" "Authorised Test Watch" "$OUT"
+# Authorised by the phone, but root has not allowed a watch: it is sent nothing.
+as_watch --approve; approve; OUT=$(as_agent isudo id 2>&1); settle; kill $WWATCH 2>/dev/null; wait $WWATCH 2>/dev/null
+check "with the watch off, the phone still approves" "uid=0(root)" "$OUT"
+refute "with the watch off, the watch is shown nothing" "wants to run" "$(cat $D/wwatch.out)"
+OUT=$(isudo-admin watch on 2>&1); check "root turns the watch on" "may now approve simple requests" "$OUT"
+grep -q '^watch = yes$' /etc/isudo/pairing.conf && ok "the setting is in the root-owned pairing file" || bad "the setting is in the root-owned pairing file"
+[ "$(stat -c '%U:%a' /etc/isudo/pairing.conf)" = "root:600" ] && ok "the pairing file is still root's alone" || bad "the pairing file is still root's alone" "$(stat -c '%U:%a' /etc/isudo/pairing.conf)"
+OUT=$(isudo-admin status 2>&1); check "status says the watch is allowed" "Watch:        allowed" "$OUT"
+# A simple request: the watch alone approves it, and it runs as root.
+as_watch --approve; OUT=$(as_agent isudo id 2>&1); wait $WWATCH 2>/dev/null
+check "a simple request approved on the watch runs as root" "uid=0(root) gid=0(root)" "$OUT"
+check "the caller is told that a watch may answer this one" "or its watch (up to" "$OUT"
+check "the watch showed the request" "wants to run as root" "$(cat $D/wwatch.out)"
+# A request naming a variable is one only the phone may approve.
+as_watch --approve; (sleep 2; isudo-devphone watch --state $D/phone.json --approve --once >$D/watch.out 2>&1) & LATE=$!
+OUT=$(as_agent isudo DEBUG=1 id 2>&1); wait $WWATCH $LATE 2>/dev/null
+check "the watch will not approve what only the phone may" "only the phone may approve this" "$(cat $D/wwatch.out)"
+check "and the phone then approves it" "uid=0(root)" "$OUT"
+refute "the caller is not told a watch may answer what only the phone may" "or its watch" "$OUT"
+# The same for a program that could be replaced without root.
+as_watch --approve; (sleep 2; isudo-devphone watch --state $D/phone.json --approve --once >$D/watch.out 2>&1) & LATE=$!
+OUT=$(as_agent bash -c 'cd /tmp && isudo ./id' 2>&1); wait $WWATCH $LATE 2>/dev/null
+check "nor a program that can be changed without root" "only the phone may approve this" "$(cat $D/wwatch.out)"
+# A watch may deny anything, and the caller is told which device said no.
+as_watch "--deny=not from my wrist"; OUT=$(as_agent isudo id 2>&1); RC=$?; wait $WWATCH 2>/dev/null
+check "a denial on the watch reports the watch and its signed reason" 'denied on Test Watch: "not from my wrist"' "$OUT"
+refute "a command denied on the watch did not run" "uid=0" "$OUT"
+[ $RC = 1 ] && ok "a denial on the watch exits 1" || bad "a denial on the watch exits 1" "got $RC"
+as_watch --deny; OUT=$(as_agent isudo DEBUG=1 id 2>&1); wait $WWATCH 2>/dev/null
+check "a watch may deny what it could not approve, and a bare denial says so" "denied on Test Watch (no reason given)" "$OUT"
+OUT=$(isudo-admin watch off 2>&1); check "root turns the watch off" "Only Test Phone can answer now" "$OUT"
+as_watch --approve; approve; OUT=$(as_agent isudo id 2>&1); settle; kill $WWATCH 2>/dev/null; wait $WWATCH 2>/dev/null
+refute "once off, the watch is shown nothing again" "wants to run" "$(cat $D/wwatch.out)"
+check "and the phone carries on" "uid=0(root)" "$OUT"
+
 echo "== unpair"
 isudo-admin unpair >/dev/null 2>&1
 OUT=$(as_agent isudo id 2>&1); check "after unpairing nothing can be approved" "isudo-admin pair" "$OUT"

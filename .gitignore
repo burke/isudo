@@ -1,0 +1,7 @@
+/target
+/ios/build
+/ios/*.xcodeproj
+/ios/.build
+.DS_Store
+*.p8
+/dev-state

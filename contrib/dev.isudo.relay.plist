@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for the isudo relay. Installed, with the @...@ placeholders
+  filled in, by contrib/install-relay-service.sh.
+
+  It runs as you, at login, not as root: the relay needs no privilege.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.isudo.relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BINDIR@/isudo-relay</string>
+    <string>--config</string>
+    <string>@CONFIG@</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ISUDO_RELAY_STATE</key>
+    <string>@STATE@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardErrorPath</key>
+  <string>@LOG@</string>
+  <key>StandardOutPath</key>
+  <string>@LOG@</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

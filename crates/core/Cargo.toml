@@ -1,0 +1,23 @@
+[package]
+name = "isudo-core"
+description = "The pure decision logic of isudo: what would run, and whether it was approved"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+# The host's side of pairing. Used by isudo-admin; not compiled into the
+# setuid binary.
+pairing = ["isudo-proto/pairing", "isudo-proto/api"]
+
+[dependencies]
+isudo-proto = { workspace = true }
+p256 = { workspace = true }
+
+[lints]
+workspace = true

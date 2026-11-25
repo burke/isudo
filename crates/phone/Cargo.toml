@@ -1,0 +1,22 @@
+[package]
+name = "isudo-phone"
+description = "The approver's side of isudo as pure logic: what the phone checks, shows and signs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+isudo-client = { workspace = true }
+isudo-proto = { workspace = true, features = ["api", "pairing"] }
+p256 = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

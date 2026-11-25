@@ -1,0 +1,11 @@
+build/
+*.xcodeproj
+IsudoKit/.build/
+# Your own signing settings, and files XcodeGen writes from project.yml.
+Local.xcconfig
+App/Info.plist
+App/Isudo.entitlements
+
+# SwiftPM and Xcode working files.
+.swiftpm/
+xcuserdata/

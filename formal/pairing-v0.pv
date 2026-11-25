@@ -1,0 +1,62 @@
+(*
+  The first pairing design, kept as a record of why it was changed.
+
+  The phone showed its short code as soon as it had scanned the QR code, and
+  the code depended only on the pairing secret and the keys. The model is
+  the same as isudo.pv's: the attacker runs the network and relay and sees
+  every QR code, and the short code binds no key (six digits can be matched
+  by trying keys).
+
+  ProVerif finds the attack: the attacker answers the host with its own key
+  and a correct MAC; the person's phone shows its code; the person types it;
+  the host pins the attacker's key. check.sh expects this query to FAIL.
+*)
+
+free c: channel.
+free qr: channel [private].
+free human: channel [private].
+
+type skey.
+type pkey.
+
+fun pk(skey): pkey.
+fun sign(bitstring, skey): bitstring.
+reduc forall m: bitstring, k: skey; checksign(sign(m, k), pk(k)) = m.
+fun mac(bitstring, bitstring): bitstring.
+fun shortcode(bitstring, bitstring): bitstring.
+
+const tagConfirm: bitstring.
+
+event PhoneScanned(bitstring, pkey).
+event Pinned(bitstring, pkey).
+
+query p: bitstring, k: pkey; event(Pinned(p, k)) ==> event(PhoneScanned(p, k)).
+
+let Host() =
+  new skH: skey;
+  new qrsecret: bitstring;
+  new pid: bitstring;
+  let pkH = pk(skH) in
+  out(c, (pid, pkH));
+  ( !out(qr, (pid, pkH, qrsecret)) )
+  | (
+    in(c, (=pid, pkP: pkey, m: bitstring));
+    if m = mac((pid, pkH, pkP), qrsecret) then
+    in(human, (=pid, typed: bitstring));
+    if typed = shortcode(pid, qrsecret) then
+    event Pinned(pid, pkP);
+    out(c, sign((tagConfirm, pid, pkP), skH))
+  ).
+
+let Phone() =
+  in(qr, (pid: bitstring, pkH: pkey, qrsecret: bitstring));
+  new skP: skey;
+  let pkP = pk(skP) in
+  event PhoneScanned(pid, pkP);
+  out(c, (pid, pkP, mac((pid, pkH, pkP), qrsecret)));
+  out(human, (pid, shortcode(pid, qrsecret))).
+
+process
+    ( !Host() )
+  | ( !Phone() )
+  | ( !in(qr, seen: bitstring); out(c, seen) )

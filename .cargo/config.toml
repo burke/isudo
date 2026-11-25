@@ -1,0 +1,8 @@
+# On macOS, always link with Apple's toolchain so binaries depend only on
+# system libraries. A `cc` from a Nix profile would link against the Nix
+# store, which is the wrong thing for a setuid binary.
+[target.aarch64-apple-darwin]
+linker = "/usr/bin/cc"
+
+[target.x86_64-apple-darwin]
+linker = "/usr/bin/cc"

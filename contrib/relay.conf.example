@@ -1,0 +1,22 @@
+# Settings for isudo-relay, read with `isudo-relay --config FILE`.
+# The same names work as environment variables, which take precedence.
+
+# Where to listen. The relay speaks plain HTTP; put something that terminates
+# TLS in front of it (a reverse proxy, a tunnel, `tailscale serve`).
+ISUDO_RELAY_LISTEN=127.0.0.1:8787
+
+# Where pairings are kept across restarts. Left unset, the service
+# definitions choose a suitable place for you.
+#ISUDO_RELAY_STATE=/var/lib/isudo-relay/state.json
+
+# If set, a host must present this to create a pairing
+# (`isudo-admin pair --registration-token ...`). Worth setting if the relay
+# is reachable by people you do not want pairing through it.
+#ISUDO_RELAY_REGISTRATION_TOKEN=
+
+# Push notifications. Without these the app shows requests only while it is
+# open. All four or none.
+#ISUDO_APNS_KEY_FILE=/path/to/AuthKey_XXXXXXXXXX.p8
+#ISUDO_APNS_KEY_ID=XXXXXXXXXX
+#ISUDO_APNS_TEAM_ID=
+#ISUDO_APNS_TOPIC=com.example.isudo

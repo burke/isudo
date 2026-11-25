@@ -1,0 +1,9 @@
+// Copy to Local.xcconfig and fill in.
+
+// Your ten-character Apple developer team id (Xcode > Settings > Apple
+// Accounts, or developer.apple.com/account under Membership details).
+DEVELOPMENT_TEAM = ABCDE12345
+
+// A bundle identifier under a domain you control. If you set up push
+// notifications, the relay's ISUDO_APNS_TOPIC must be this same value.
+ISUDO_BUNDLE_ID = com.example.isudo

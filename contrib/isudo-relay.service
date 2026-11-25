@@ -1,0 +1,40 @@
+# systemd unit for the isudo relay. Installed by contrib/install-relay-service.sh.
+#
+# The relay needs no privilege at all: it stores ciphertext for a few minutes
+# and sends push notifications. So it runs as a throwaway user with as little
+# access to the machine as systemd can arrange.
+
+[Unit]
+Description=isudo relay
+Documentation=https://github.com/burke/isudo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=@BINDIR@/isudo-relay --config /etc/isudo/relay.conf
+Environment=ISUDO_RELAY_STATE=%S/isudo-relay/state.json
+Restart=on-failure
+RestartSec=2
+
+DynamicUser=yes
+StateDirectory=isudo-relay
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# AF_UNIX and AF_NETLINK are what name resolution needs.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[package]
+name = "isudo-helper"
+description = "Unprivileged network helper run by the isudo setuid binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+isudo-client = { workspace = true }
+isudo-proto = { workspace = true, features = ["api"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,85 @@
+name: Isudo
+options:
+  bundleIdPrefix: dev.isudo
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+packages:
+  IsudoKit:
+    path: IsudoKit
+# Signing identity (team and bundle id) comes from Config.xcconfig, which
+# reads your own values from Local.xcconfig if that file exists.
+configFiles:
+  Debug: Config.xcconfig
+  Release: Config.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Isudo:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/Sources
+      - path: App/Resources
+    dependencies:
+      - package: IsudoKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ISUDO_BUNDLE_ID)
+        PRODUCT_NAME: isudo
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: isudo
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSFaceIDUsageDescription: Face ID confirms that it is you approving a command to run as root.
+        NSCameraUsageDescription: The camera scans the pairing code shown by a computer.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIBackgroundModes: [remote-notification]
+        CFBundleURLTypes:
+          - CFBundleURLName: $(ISUDO_BUNDLE_ID).pair
+            CFBundleURLSchemes: [isudo]
+        ITSAppUsesNonExemptEncryption: false
+    entitlements:
+      path: App/Isudo.entitlements
+      properties:
+        aps-environment: development
+        com.apple.developer.usernotifications.time-sensitive: true
+  IsudoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: App/UITests
+    dependencies:
+      - target: Isudo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ISUDO_BUNDLE_ID).uitests
+        TEST_TARGET_NAME: Isudo
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Isudo:
+    build:
+      targets:
+        Isudo: all
+        IsudoUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [IsudoUITests]

@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: lint, test, simulate, prove
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Strict clippy and all tests
+        run: nix develop -c make check
+      - name: Deterministic simulation, more seeds
+        run: nix develop -c make sim SEEDS=300
+      - name: Protocol model
+        run: nix develop -c make formal
+
+  setuid:
+    name: real setuid root, in a container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test-linux
+
+  # macOS runners are billed at ten times the rate for private repositories,
+  # so this job waits until the repository is public.
+  macos:
+    name: build and test on macOS
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - run: nix develop -c make check
+      - name: Phone logic in Swift, against the shared vectors
+        run: swift test
+        working-directory: ios/IsudoKit

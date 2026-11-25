@@ -1,0 +1,11 @@
+// Signing settings for the isudo app.
+//
+// The values here build for the Simulator as they are. To run on a phone,
+// copy Local.xcconfig.example to Local.xcconfig and put your own Apple
+// developer team and a bundle identifier you own in it. Local.xcconfig is
+// not tracked by git.
+
+ISUDO_BUNDLE_ID = me.libbey.isudo
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

@@ -1,0 +1,21 @@
+[package]
+name = "isudo-sim"
+description = "Deterministic simulation of isudo: real host, relay and phone code under a seeded schedule with an active attacker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+isudo-client = { workspace = true }
+isudo-core = { workspace = true, features = ["pairing"] }
+isudo-phone = { workspace = true }
+isudo-proto = { workspace = true, features = ["api", "pairing"] }
+isudo-relay-core = { workspace = true }
+p256 = { workspace = true }
+
+[lints]
+workspace = true

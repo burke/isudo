@@ -1,0 +1,21 @@
+[package]
+name = "isudo-admin"
+description = "Pairs this machine with a phone for isudo, and removes the pairing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+isudo-client = { workspace = true }
+isudo-core = { workspace = true, features = ["pairing"] }
+isudo-proto = { workspace = true, features = ["api", "pairing"] }
+libc = { workspace = true }
+p256 = { workspace = true }
+qrcode = { version = "0.15", default-features = false }
+
+[lints]
+workspace = true

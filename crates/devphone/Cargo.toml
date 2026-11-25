@@ -1,0 +1,20 @@
+[package]
+name = "isudo-devphone"
+description = "A phone for the terminal: pairs with a host and approves or denies requests, for testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+isudo-client = { workspace = true }
+isudo-phone = { path = "../phone" }
+isudo-proto = { workspace = true, features = ["api", "pairing"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

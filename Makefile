@@ -1,0 +1,87 @@
+# isudo: common tasks. Run inside `nix develop` (or with cargo, clippy and
+# cargo-nextest on PATH).
+
+# Where things are installed. Everything from the programs up to / must
+# belong to root and be writable only by root, or a non-root user could swap
+# the programs. /usr/local/bin fails that on many Macs (Homebrew gives it to
+# the user), so macOS gets its own root-owned prefix.
+ifeq ($(shell uname -s),Darwin)
+PREFIX   ?= /opt/isudo
+else
+PREFIX   ?= /usr/local
+endif
+BINDIR   := $(PREFIX)/bin
+LIBEXEC  := $(PREFIX)/libexec
+RELEASE  := target/release
+SEEDS    ?= 1000
+
+.PHONY: build check lint test sim formal vectors test-linux install relay-service uninstall
+
+# The helper's location is compiled into isudo and isudo-admin, so build and
+# install must agree on PREFIX.
+build:
+	ISUDO_LIBEXEC_DIR=$(LIBEXEC) cargo build --release --locked \
+	  -p isudo -p isudo-helper -p isudo-admin -p isudo-relay -p isudo-devphone
+
+# Everything CI should hold: strict lints in both feature configurations,
+# then the tests.
+check: lint test
+
+# `cargo-clippy clippy` rather than `cargo clippy`: cargo prefers a
+# cargo-clippy in ~/.cargo/bin (a rustup shim, possibly for an old
+# toolchain) over the one on PATH.
+lint:
+	cargo-clippy clippy --workspace --all-targets -- -D warnings
+	cargo-clippy clippy --workspace --all-targets --all-features -- -D warnings
+
+test:
+	cargo nextest run --workspace
+	cargo nextest run -p isudo-proto --all-features
+
+# A long run of the deterministic simulator. A failure prints its seed.
+sim:
+	ISUDO_SIM_SEEDS=$(SEEDS) cargo nextest run --release -p isudo-sim
+
+# Check the symbolic protocol model (formal/isudo.pv) with ProVerif.
+formal:
+	./formal/check.sh
+
+# Regenerate the cross-language test vectors used by the iOS app's tests.
+vectors:
+	cargo run -q -p isudo-phone --example vectors > testdata/vectors.json
+
+# The real thing: builds on Linux, installs isudo setuid root in a
+# container, pairs it with the terminal test phone, and attacks it.
+test-linux:
+	docker run --rm -v "$(CURDIR)":/src:ro -v isudo-target:/target \
+	  -v isudo-registry:/usr/local/cargo/registry rust:1 bash /src/tests/setuid/run.sh
+
+# Run as root: `sudo make install` after `make build` as yourself.
+# isudo must end up owned by root with the setuid bit, on a filesystem that
+# is not mounted nosuid (so not in the Nix store). The last step verifies
+# that nothing installed can be replaced without root.
+install:
+	@test "$$(id -u)" = 0 || { echo "run as root: sudo make install"; exit 1; }
+	@test -x $(RELEASE)/isudo || { echo "run 'make build' first, as yourself"; exit 1; }
+	install -d -o 0 -g 0 -m 0755 $(PREFIX) $(BINDIR) $(LIBEXEC) /etc/isudo
+	install -o 0 -g 0 -m 4755 $(RELEASE)/isudo $(BINDIR)/isudo
+	install -o 0 -g 0 -m 0755 $(RELEASE)/isudo-helper $(LIBEXEC)/isudo-helper
+	install -o 0 -g 0 -m 0755 $(RELEASE)/isudo-admin $(BINDIR)/isudo-admin
+	install -o 0 -g 0 -m 0755 $(RELEASE)/isudo-relay $(BINDIR)/isudo-relay
+	$(BINDIR)/isudo-admin check
+	@echo "Installed in $(BINDIR). Put that directory on your PATH, then:"
+	@echo "  sudo $(BINDIR)/isudo-admin pair --relay https://your-relay.example"
+
+# Run the relay as a service on this machine: a launchd agent on macOS (run
+# as yourself), a systemd unit on Linux (run with sudo). Only needed on the
+# machine that hosts the relay.
+relay-service:
+	BINDIR=$(BINDIR) ./contrib/install-relay-service.sh
+
+uninstall:
+	@test "$$(id -u)" = 0 || { echo "run as root: sudo make uninstall"; exit 1; }
+	unlink $(BINDIR)/isudo
+	unlink $(BINDIR)/isudo-admin
+	unlink $(BINDIR)/isudo-relay
+	unlink $(LIBEXEC)/isudo-helper
+	@echo "Removed the programs. The pairing in /etc/isudo was left alone; run 'isudo-admin unpair' first to remove it."

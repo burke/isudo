@@ -1,0 +1,120 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/burke/isudo"
+readme = "README.md"
+keywords = ["sudo", "security", "approval"]
+categories = ["command-line-utilities", "authentication"]
+
+[workspace.dependencies]
+isudo-proto = { path = "crates/proto", default-features = false }
+isudo-core = { path = "crates/core" }
+isudo-client = { path = "crates/client" }
+isudo-phone = { path = "crates/phone" }
+isudo-relay-core = { path = "crates/relay-core" }
+libc = "0.2"
+sha2 = { version = "0.11", default-features = false }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+hmac = "0.13"
+hpke = { version = "0.15", default-features = false, features = ["alloc", "nistp", "aes", "getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }
+
+# Lints are as strict as clippy gets, on purpose: this workspace contains a
+# setuid-root binary. Everything in `all`, `pedantic` and `nursery` is an
+# error, plus the restriction lints that keep panics, silent truncation and
+# unexplained unsafe out of the code. Exceptions are made per site with
+# `#[expect(..., reason = "...")]`, never globally.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+unreachable_pub = "deny"
+missing_debug_implementations = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_qualifications = "deny"
+unused_results = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Several versions of a transitive dependency are outside our control.
+multiple_crate_versions = "allow"
+# Contradicts rustc's `unreachable_pub`, which is the one we follow.
+redundant_pub_crate = "allow"
+# Panics: none in non-test code.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+integer_division_remainder_used = "allow"
+# Conversions: explicit and checked.
+as_conversions = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+# Unsafe: one operation per block, each with a SAFETY comment.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+# Output: only through code that cannot panic on a closed descriptor.
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"
+# Hygiene.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+clone_on_ref_ptr = "deny"
+create_dir = "deny"
+exit = "deny"
+filetype_is_file = "deny"
+float_arithmetic = "deny"
+get_unwrap = "deny"
+if_then_some_else_none = "deny"
+let_underscore_must_use = "deny"
+lossy_float_literal = "deny"
+map_err_ignore = "deny"
+mem_forget = "deny"
+mixed_read_write_in_expression = "deny"
+needless_raw_strings = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+redundant_type_annotations = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+same_name_method = "deny"
+str_to_string = "deny"
+string_lit_chars_any = "deny"
+tests_outside_test_module = "deny"
+try_err = "deny"
+unneeded_field_pattern = "deny"
+unseparated_literal_suffix = "deny"
+verbose_file_reads = "deny"
+wildcard_enum_match_arm = "deny"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = "symbols"
+overflow-checks = true
+
+[profile.dev]
+panic = "abort"
+
+# Optimize dependencies even in development builds: the cryptography is
+# far too slow unoptimized for the simulator and tests to be pleasant.
+[profile.dev.package."*"]
+opt-level = 2

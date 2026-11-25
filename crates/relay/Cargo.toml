@@ -1,0 +1,24 @@
+[package]
+name = "isudo-relay"
+description = "The isudo relay server: stores encrypted requests and sends push notifications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+isudo-proto = { workspace = true, features = ["api"] }
+isudo-relay-core = { path = "../relay-core" }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+p256 = { workspace = true, features = ["pkcs8", "pem"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "fs"] }
+
+[lints]
+workspace = true

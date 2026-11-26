@@ -175,6 +175,8 @@ struct PendingRecord {
     envelope: String,
     /// The same request sealed to delegates: (signing key, envelope).
     delegate_envelopes: Vec<(String, String)>,
+    /// Submitted without a push. See [`SubmitRequest::quiet`].
+    quiet: bool,
     answer: Option<Answer>,
 }
 
@@ -560,7 +562,8 @@ impl Relay {
     }
 
     /// Helper: stores an encrypted request and says whether to push. A
-    /// request submitted as quiet is stored without one.
+    /// request submitted as quiet is stored without one, and replaces any
+    /// quiet request of the same pairing that is still unanswered.
     ///
     /// The ticket is the host's signature over the pairing, the request id
     /// and the expiry, so only the paired host's setuid binary can cause a
@@ -603,11 +606,20 @@ impl Relay {
         while record.recent.front().is_some_and(|at| now.saturating_sub(*at) >= limits.rate_window) {
             let _ = record.recent.pop_front();
         }
+        if body.quiet {
+            // A quiet request is a standing notice: the newest is the only
+            // one worth keeping, so it takes the place of any still waiting.
+            // It interrupts nobody, so it is not counted against the rate
+            // at which a pairing may interrupt.
+            self.requests.retain(|_, r| !(r.pairing_id == pairing && r.quiet && r.answer.is_none()));
+        }
         let waiting = self.requests.values().filter(|r| r.pairing_id == pairing && r.answer.is_none()).count();
-        if record.recent.len() >= limits.rate_count || waiting >= limits.max_pending {
+        if (!body.quiet && record.recent.len() >= limits.rate_count) || waiting >= limits.max_pending {
             return Err(Reject::TooMany);
         }
-        record.recent.push_back(now);
+        if !body.quiet {
+            record.recent.push_back(now);
+        }
 
         // Kept only for delegates registered right now, one envelope each.
         let mut delegate_envelopes: Vec<(String, String)> = Vec::new();
@@ -633,6 +645,7 @@ impl Relay {
             expires_at: body.expires_at,
             envelope: body.envelope.clone(),
             delegate_envelopes,
+            quiet: body.quiet,
             answer: None,
         };
         let _ = self.requests.insert(request, pending);

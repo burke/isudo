@@ -135,7 +135,10 @@ pub struct SubmitRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delegate_envelopes: Vec<DelegateEnvelope>,
     /// Store the request without sending a push. For something the phone
-    /// should find when it next looks, not something to interrupt for.
+    /// should find when it next looks, not something to interrupt for: a
+    /// standing notice. Each one replaces the pairing's earlier quiet
+    /// requests that are still unanswered, and none counts against the
+    /// rate at which a pairing may interrupt.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quiet: bool,
 }

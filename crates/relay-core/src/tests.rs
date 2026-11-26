@@ -303,6 +303,31 @@ fn a_quiet_request_is_stored_without_a_push() {
 }
 
 #[test]
+fn a_quiet_request_replaces_the_quiet_ones_before_it_and_is_not_rate_limited() {
+    let mut relay = paired(true);
+    let _ = relay.submit(200, &submit_body(1, 320)).unwrap();
+    // Far more standing notices than the pairing may have waiting or may
+    // send in the window: each takes the last one's place.
+    for request in 10..80 {
+        let quiet = SubmitRequest { quiet: true, ..submit_body(request, 320) };
+        assert_eq!(relay.submit(200, &quiet), Ok(None));
+    }
+    let waiting = relay.pending(201, &pid(), &token()).unwrap().requests;
+    assert_eq!(waiting.iter().map(|r| r.request_id.clone()).collect::<Vec<_>>(), [rid(1), rid(79)]);
+    assert_eq!(relay.poll_answer(201, &rid(78)), Err(Reject::NotFound));
+    // An answered notice is left alone, so its answer can still be collected.
+    let _settled = relay.answer(202, &rid(79), &token(), approve()).unwrap();
+    let _ = relay.submit(203, &SubmitRequest { quiet: true, ..submit_body(80, 320) }).unwrap();
+    assert!(relay.poll_answer(204, &rid(79)).unwrap().is_some());
+    // Ordinary requests are limited exactly as before.
+    let mut loud = 0;
+    while relay.submit(205, &submit_body(100 + loud, 330)).is_ok() {
+        loud += 1;
+    }
+    assert!(loud < 8);
+}
+
+#[test]
 fn an_answer_may_carry_terms_which_come_back_unchanged() {
     let mut relay = paired(true);
     let _ = relay.submit(200, &submit_body(1, 320)).unwrap();

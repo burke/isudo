@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use isudo_proto::api::{
     Ack, AddDelegate, Answer, Claim, ClaimView, Confirm, CreatePairing, Decision, DelegateList, DeviceUpdate,
-    PairingState, PairingStatus, PendingList, PendingRequest, RemoveDelegate, Revoke, SubmitRequest,
+    PairingState, PairingStatus, PendingList, PendingRequest, RemoveDelegate, Revoke, SubmitRequest, MAX_TERMS_LEN,
 };
 use isudo_proto::codec::{b64_decode, b64_decode_array, b64_encode, hex_decode_array, hex_encode};
 use isudo_proto::delegation::SignedDelegation;
@@ -559,7 +559,8 @@ impl Relay {
         self.requests.retain(|_, request| request.pairing_id != *id);
     }
 
-    /// Helper: stores an encrypted request and says whether to push.
+    /// Helper: stores an encrypted request and says whether to push. A
+    /// request submitted as quiet is stored without one.
     ///
     /// The ticket is the host's signature over the pairing, the request id
     /// and the expiry, so only the paired host's setuid binary can cause a
@@ -615,7 +616,8 @@ impl Relay {
                 delegate_envelopes.push((delegate.sign_pub.clone(), sealed.envelope.clone()));
             }
         }
-        let push = record.claim.as_ref().and_then(|claim| claim.device.clone()).map(|device| Push {
+        let device = record.claim.as_ref().and_then(|claim| claim.device.clone()).filter(|_| !body.quiet);
+        let push = device.map(|device| Push {
             device,
             pairing_id: body.pairing_id.clone(),
             request_id: body.request_id.clone(),
@@ -699,7 +701,9 @@ impl Relay {
             (Decision::Approve, Some(_)) => false,
             (Decision::Deny, reason) => reason.as_ref().is_none_or(|r| r.len() <= MAX_REASON_LEN),
         };
-        if !shape_ok || b64_decode_array::<SIG_LEN>(&body.sig).is_err() {
+        let terms_ok =
+            body.terms.as_ref().is_none_or(|terms| terms.len() <= MAX_TERMS_LEN && b64_decode(terms).is_ok());
+        if !shape_ok || !terms_ok || b64_decode_array::<SIG_LEN>(&body.sig).is_err() {
             return Err(Reject::Invalid);
         }
         pending.answer = Some(Answer { delegation, ..body });

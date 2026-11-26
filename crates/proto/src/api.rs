@@ -134,6 +134,10 @@ pub struct SubmitRequest {
     /// The same plaintext sealed to each delegate the helper found.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delegate_envelopes: Vec<DelegateEnvelope>,
+    /// Store the request without sending a push. For something the phone
+    /// should find when it next looks, not something to interrupt for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,7 +202,14 @@ pub struct Answer {
     /// checks it against the phone key it pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<String>,
+    /// More that the signature covers, for protocols whose answers say more
+    /// than yes or no. Opaque to the relay, and unused by isudo itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<String>,
 }
+
+/// Longest [`Answer::terms`], in base64 characters.
+pub const MAX_TERMS_LEN: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {

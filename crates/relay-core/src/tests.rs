@@ -94,6 +94,7 @@ fn submit_body(request: u8, expires_at: u64) -> SubmitRequest {
         ticket_sig: host().sign(&sigs::ticket_msg(&PID, &rid, expires_at)),
         envelope: b64_encode(b"opaque ciphertext"),
         delegate_envelopes: Vec::new(),
+        quiet: false,
     }
 }
 
@@ -102,7 +103,7 @@ fn rid(request: u8) -> String {
 }
 
 fn approve() -> Answer {
-    Answer { decision: Decision::Approve, sig: b64_encode(&[9; SIG_LEN]), reason: None, delegation: None }
+    Answer { decision: Decision::Approve, sig: b64_encode(&[9; SIG_LEN]), reason: None, delegation: None, terms: None }
 }
 
 #[test]
@@ -289,6 +290,29 @@ fn only_the_paired_phone_reads_and_answers() {
     let device = DeviceUpdate { apns_token: APNS.into(), apns_env: "sandbox".into() };
     assert_eq!(relay.update_device(&pid(), &wrong, &device), Err(Reject::Unauthorized));
     assert_eq!(relay.poll_answer(202, &rid(1)), Ok(None));
+}
+
+#[test]
+fn a_quiet_request_is_stored_without_a_push() {
+    let mut relay = paired(true);
+    let loud = relay.submit(200, &submit_body(1, 320)).unwrap();
+    assert!(loud.is_some());
+    let quiet = relay.submit(200, &SubmitRequest { quiet: true, ..submit_body(2, 320) }).unwrap();
+    assert_eq!(quiet, None);
+    assert_eq!(relay.pending(201, &pid(), &token()).unwrap().requests.len(), 2);
+}
+
+#[test]
+fn an_answer_may_carry_terms_which_come_back_unchanged() {
+    let mut relay = paired(true);
+    let _ = relay.submit(200, &submit_body(1, 320)).unwrap();
+    let not_base64 = Answer { terms: Some("not base64!".into()), ..approve() };
+    assert_eq!(relay.answer(201, &rid(1), &token(), not_base64), Err(Reject::Invalid));
+    let too_long = Answer { terms: Some("A".repeat(MAX_TERMS_LEN + 4)), ..approve() };
+    assert_eq!(relay.answer(201, &rid(1), &token(), too_long), Err(Reject::Invalid));
+    let terms = b64_encode(b"one hour, and no longer");
+    let _settled = relay.answer(202, &rid(1), &token(), Answer { terms: Some(terms.clone()), ..approve() }).unwrap();
+    assert_eq!(relay.poll_answer(203, &rid(1)).unwrap().unwrap().terms, Some(terms));
 }
 
 #[test]

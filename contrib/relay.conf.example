@@ -20,3 +20,10 @@ ISUDO_RELAY_LISTEN=127.0.0.1:8787
 #ISUDO_APNS_KEY_ID=XXXXXXXXXX
 #ISUDO_APNS_TEAM_ID=
 #ISUDO_APNS_TOPIC=com.example.isudo
+
+# Only for another app with its own instance of this relay. The relay cannot
+# read a request, so the words of a push are fixed per instance. {host} is
+# the paired computer's name.
+#ISUDO_APNS_BODY={host} wants to run a command as root
+#ISUDO_APNS_CATEGORY=ISUDO_REQUEST
+#ISUDO_APNS_PAYLOAD_KEY=isudo

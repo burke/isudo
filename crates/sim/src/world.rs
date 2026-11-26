@@ -376,6 +376,7 @@ impl World {
             ticket_sig: b64_encode(&self.host_key.sign(&sigs::ticket_msg(&self.pairing_id, &request_id, expires_at))),
             envelope: b64_encode(&sealed),
             delegate_envelopes,
+            quiet: false,
         };
         self.seen_deliveries.push(PendingRequest {
             request_id: submit.request_id.clone(),
@@ -720,6 +721,7 @@ impl World {
                 sig: b64_encode(&sign_raw(&self.attacker, b"approve, honest")),
                 reason: None,
                 delegation: None,
+                terms: None,
             },
             // The same answer under the other device's name: the watch's
             // authorisation stapled to the phone's signature, or removed

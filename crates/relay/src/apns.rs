@@ -26,6 +26,7 @@ pub(crate) struct Apns {
     key_id: String,
     team_id: String,
     topic: String,
+    wording: Wording,
     /// The current provider token and when it was issued.
     token: Mutex<Option<(u64, String)>>,
 }
@@ -36,6 +37,30 @@ pub(crate) struct ApnsConfig {
     pub key_id: String,
     pub team_id: String,
     pub topic: String,
+    pub wording: Wording,
+}
+
+/// What a push says and how the app recognises it. The defaults are
+/// isudo's. Another app served by its own instance of this relay sets its
+/// own, because the relay cannot read a request to describe it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Wording {
+    /// The alert's text. `{host}` stands for the paired computer's name.
+    pub body: String,
+    /// The notification category, which selects the app's actions.
+    pub category: String,
+    /// The name of the payload's own dictionary.
+    pub key: String,
+}
+
+impl Default for Wording {
+    fn default() -> Self {
+        Self {
+            body: "{host} wants to run a command as root".to_owned(),
+            category: "ISUDO_REQUEST".to_owned(),
+            key: "isudo".to_owned(),
+        }
+    }
 }
 
 impl Apns {
@@ -56,6 +81,7 @@ impl Apns {
             key_id: config.key_id,
             team_id: config.team_id,
             topic: config.topic,
+            wording: config.wording,
             token: Mutex::new(None),
         })
     }
@@ -86,22 +112,25 @@ impl Apns {
     /// The request itself is never in the clear here. If the pairing has a
     /// watch and the request is small, it rides along sealed to the watch,
     /// so that a watch handed this notification can show it at once.
-    fn waiting_payload(push: &Push) -> serde_json::Value {
-        let body = [push.host_name.as_str(), " wants to run a command as root"].concat();
-        let mut isudo = json!({ "p": push.pairing_id, "r": push.request_id, "x": push.expires_at });
-        if let (Some(envelope), Some(fields)) = (&push.delegate_envelope, isudo.as_object_mut()) {
+    fn waiting_payload(&self, push: &Push) -> serde_json::Value {
+        let body = self.wording.body.replace("{host}", &push.host_name);
+        let mut ours = json!({ "p": push.pairing_id, "r": push.request_id, "x": push.expires_at });
+        if let (Some(envelope), Some(fields)) = (&push.delegate_envelope, ours.as_object_mut()) {
             let _ = fields.insert("w".to_owned(), json!(envelope));
         }
-        json!({
+        let mut payload = json!({
             "aps": {
                 "alert": { "title": "Approval requested", "body": body },
                 "sound": "default",
                 "interruption-level": "time-sensitive",
-                "category": "ISUDO_REQUEST",
+                "category": self.wording.category,
                 "thread-id": push.pairing_id,
             },
-            "isudo": isudo,
-        })
+        });
+        if let Some(fields) = payload.as_object_mut() {
+            let _ = fields.insert(self.wording.key.clone(), ours);
+        }
+        payload
     }
 
     /// Sends the push for a waiting request. Returns a short description of
@@ -113,7 +142,7 @@ impl Apns {
             ("apns-expiration", push.expires_at.to_string()),
             ("apns-collapse-id", push.request_id.clone()),
         ];
-        self.post(&push.device, &headers, &Self::waiting_payload(push), now).await
+        self.post(&push.device, &headers, &self.waiting_payload(push), now).await
     }
 
     /// Tells the app, without alerting anyone, that a request has been
@@ -121,10 +150,11 @@ impl Apns {
     /// Best effort: the system may delay or drop a background push, and a
     /// stale notification is harmless (the computer has stopped waiting).
     pub(crate) async fn send_settled(&self, settled: &Settled, now: u64) -> Result<(), String> {
-        let payload = json!({
-            "aps": { "content-available": 1 },
-            "isudo": { "p": settled.pairing_id, "r": settled.request_id, "done": true },
-        });
+        let mut payload = json!({ "aps": { "content-available": 1 } });
+        if let Some(fields) = payload.as_object_mut() {
+            let ours = json!({ "p": settled.pairing_id, "r": settled.request_id, "done": true });
+            let _ = fields.insert(self.wording.key.clone(), ours);
+        }
         let headers = [
             ("apns-push-type", "background".to_owned()),
             ("apns-priority", "5".to_owned()),
@@ -175,6 +205,7 @@ mod tests {
             key_id: "ABC123DEFG".into(),
             team_id: "TEAM123456".into(),
             topic: "com.example.isudo".into(),
+            wording: Wording::default(),
             token: Mutex::new(None),
         }
     }
@@ -217,19 +248,36 @@ mod tests {
 
     #[test]
     fn the_push_names_the_request_and_may_carry_it_sealed_to_a_watch() {
-        let plain = Apns::waiting_payload(&push(None));
+        let apns = apns();
+        let plain = apns.waiting_payload(&push(None));
         assert_eq!(plain["isudo"]["r"], "b2".repeat(16));
         assert_eq!(plain["isudo"]["x"], 1_795_000_120_u64);
         assert!(plain["isudo"].get("w").is_none());
         assert_eq!(plain["aps"]["interruption-level"], "time-sensitive");
 
         let sealed = "A".repeat(isudo_relay_core::MAX_PUSHED_ENVELOPE);
-        let with = Apns::waiting_payload(&push(Some(&sealed)));
+        let with = apns.waiting_payload(&push(Some(&sealed)));
         assert_eq!(with["isudo"]["w"], sealed);
         // Apple accepts four kilobytes. The largest envelope the relay will
         // attach, with the longest computer name, stays inside that.
         let mut longest = push(Some(&sealed));
         longest.host_name = "x".repeat(64);
-        assert!(Apns::waiting_payload(&longest).to_string().len() < 4096);
+        assert!(apns.waiting_payload(&longest).to_string().len() < 4096);
+        assert_eq!(plain["aps"]["alert"]["body"], "burke-mbp wants to run a command as root");
+    }
+
+    #[test]
+    fn another_app_sets_its_own_wording() {
+        let wording = Wording {
+            body: "A bot on {host} is asking for network access".to_owned(),
+            category: "WARDEN_REQUEST".to_owned(),
+            key: "warden".to_owned(),
+        };
+        let apns = Apns { wording, ..apns() };
+        let payload = apns.waiting_payload(&push(None));
+        assert_eq!(payload["aps"]["alert"]["body"], "A bot on burke-mbp is asking for network access");
+        assert_eq!(payload["aps"]["category"], "WARDEN_REQUEST");
+        assert_eq!(payload["warden"]["r"], "b2".repeat(16));
+        assert!(payload.get("isudo").is_none());
     }
 }

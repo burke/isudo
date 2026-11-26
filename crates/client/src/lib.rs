@@ -90,7 +90,7 @@ mod tests {
     const NOW: u64 = 1_795_000_000;
 
     fn answer(decision: Decision, reason: Option<&str>) -> Answer {
-        Answer { decision, sig: b64_encode(&[7; 64]), reason: reason.map(str::to_owned), delegation: None }
+        Answer { decision, sig: b64_encode(&[7; 64]), reason: reason.map(str::to_owned), delegation: None, terms: None }
     }
 
     fn public(key: &SigningKey) -> [u8; PUBKEY_LEN] {

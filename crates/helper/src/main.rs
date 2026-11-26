@@ -69,6 +69,7 @@ fn run() -> Result<Outcome, Failure> {
             ticket_sig: b64_encode(&job.ticket_sig),
             envelope: b64_encode(&sealed),
             delegate_envelopes,
+            quiet: false,
         })
         .map_err(relay_failure)?;
 

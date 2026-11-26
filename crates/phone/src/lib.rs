@@ -367,6 +367,39 @@ impl Pairing {
         approval(&self.sign_key, card)
     }
 
+    /// This pairing's identifier.
+    #[must_use]
+    pub const fn id(&self) -> &[u8; PAIRING_ID_LEN] {
+        &self.id
+    }
+
+    /// Decrypts a delivery and checks the host's signature on it, and
+    /// nothing more: the bytes are returned as the host signed them.
+    ///
+    /// This is for another protocol carried over the same pairing, which
+    /// has its own messages and must make every further check itself:
+    /// that the message decodes, names this pairing, is the one it was
+    /// delivered as, is current, and has not been shown before.
+    ///
+    /// # Errors
+    /// Fails unless the pairing is active, the delivery decrypts under this
+    /// pairing's key, and the paired host signed it.
+    pub fn unseal(&self, delivered: &PendingRequest) -> Result<Vec<u8>, Refusal> {
+        if !self.active {
+            return Err(Refusal::NotActive);
+        }
+        Host { id: &self.id, host_pub: &self.host_pub }.unseal(&self.kem_private, delivered)
+    }
+
+    /// Signs a message of another protocol with this pairing's key. On a
+    /// real phone this is the step behind Face ID. The caller is
+    /// responsible for the message starting with a context of its own.
+    #[must_use]
+    pub fn sign(&self, message: &[u8]) -> [u8; SIG_LEN] {
+        let signature: Signature = self.sign_key.sign(message);
+        signature.to_bytes().into()
+    }
+
     /// Signs a denial of a card, with an optional reason for the caller. The
     /// reason is cut to the protocol's limit at a character boundary.
     #[must_use]
@@ -411,6 +444,25 @@ struct Host<'a> {
 }
 
 impl Host<'_> {
+    /// Decrypts a delivery and checks that the paired host signed it.
+    fn unseal(
+        &self,
+        kem_private: &[u8; envelope::PRIVATE_KEY_LEN],
+        delivered: &PendingRequest,
+    ) -> Result<Vec<u8>, Refusal> {
+        let sealed = b64_decode(&delivered.envelope).map_err(|_e| Refusal::Undecryptable)?;
+        let (host_sig, bytes) = envelope::open(kem_private, self.id, &sealed).map_err(|_e| Refusal::Undecryptable)?;
+        let signed_by_host = match (VerifyingKey::from_sec1_bytes(self.host_pub), Signature::from_slice(&host_sig)) {
+            (Ok(key), Ok(sig)) => key.verify(&sigs::host_request_msg(&bytes), &sig).is_ok(),
+            _ => false,
+        };
+        if signed_by_host {
+            Ok(bytes)
+        } else {
+            Err(Refusal::NotFromHost)
+        }
+    }
+
     /// The checks every approving device makes, in this order, before a
     /// request may be shown.
     fn open(
@@ -420,15 +472,7 @@ impl Host<'_> {
         delivered: &PendingRequest,
         now: u64,
     ) -> Result<Card, Refusal> {
-        let sealed = b64_decode(&delivered.envelope).map_err(|_e| Refusal::Undecryptable)?;
-        let (host_sig, bytes) = envelope::open(kem_private, self.id, &sealed).map_err(|_e| Refusal::Undecryptable)?;
-        let signed_by_host = match (VerifyingKey::from_sec1_bytes(self.host_pub), Signature::from_slice(&host_sig)) {
-            (Ok(key), Ok(sig)) => key.verify(&sigs::host_request_msg(&bytes), &sig).is_ok(),
-            _ => false,
-        };
-        if !signed_by_host {
-            return Err(Refusal::NotFromHost);
-        }
+        let bytes = self.unseal(kem_private, delivered)?;
         let request = Request::decode(&bytes).map_err(|_e| Refusal::Malformed)?;
         let request_id = sigs::request_id(&bytes);
         if request.pairing_id != *self.id || hex_decode_array(&delivered.request_id) != Ok(request_id) {
@@ -450,7 +494,13 @@ impl Host<'_> {
 
 fn approval(key: &SigningKey, card: &Card) -> Answer {
     let signature: Signature = key.sign(&sigs::approve_msg(&card.digest));
-    Answer { decision: Decision::Approve, sig: b64_encode(&signature.to_bytes()), reason: None, delegation: None }
+    Answer {
+        decision: Decision::Approve,
+        sig: b64_encode(&signature.to_bytes()),
+        reason: None,
+        delegation: None,
+        terms: None,
+    }
 }
 
 /// A denial reason cut to the protocol's limit, at a character boundary.
@@ -471,6 +521,7 @@ fn denial(key: &SigningKey, card: &Card, reason: &str) -> Answer {
         sig: b64_encode(&signature.to_bytes()),
         reason: Some(reason.to_owned()).filter(|r| !r.is_empty()),
         delegation: None,
+        terms: None,
     }
 }
 
@@ -622,6 +673,34 @@ impl Delegate {
     #[must_use]
     pub fn deny(&self, card: &Card, reason: &str) -> Answer {
         denial(&self.sign_key, card, reason)
+    }
+
+    /// This pairing's identifier.
+    #[must_use]
+    pub const fn id(&self) -> &[u8; PAIRING_ID_LEN] {
+        &self.id
+    }
+
+    /// As [`Pairing::unseal`], for this device: the signed bytes of a
+    /// delivery, for another protocol to check further.
+    ///
+    /// # Errors
+    /// Fails without a current authorisation from the phone, or if the
+    /// delivery does not decrypt or the paired host did not sign it.
+    pub fn unseal(&self, delivered: &PendingRequest, now: u64) -> Result<Vec<u8>, Refusal> {
+        let Some(signed) = &self.delegation else { return Err(Refusal::NotActive) };
+        if now > signed.delegation.not_after {
+            return Err(Refusal::AuthorisationExpired);
+        }
+        Host { id: &self.id, host_pub: &self.host_pub }.unseal(&self.kem_private, delivered)
+    }
+
+    /// As [`Pairing::sign`], with this device's key. The host accepts it
+    /// only together with the phone's authorisation of that key.
+    #[must_use]
+    pub fn sign(&self, message: &[u8]) -> [u8; SIG_LEN] {
+        let signature: Signature = self.sign_key.sign(message);
+        signature.to_bytes().into()
     }
 }
 

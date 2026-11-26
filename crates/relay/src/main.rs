@@ -18,7 +18,14 @@
 //! ISUDO_APNS_KEY_ID                the key's ten-character id
 //! ISUDO_APNS_TEAM_ID               the Apple developer team id
 //! ISUDO_APNS_TOPIC                 the app's bundle identifier
+//! ISUDO_APNS_BODY                  the alert's text; {host} is the computer's name
+//! ISUDO_APNS_CATEGORY              the notification category (default ISUDO_REQUEST)
+//! ISUDO_APNS_PAYLOAD_KEY           the payload's own dictionary (default isudo)
 //! ```
+//!
+//! The last three are for another app with its own instance of this relay.
+//! The relay cannot read a request, so it cannot describe one: the words
+//! are fixed per instance.
 //!
 //! The server speaks plain HTTP and expects TLS to be terminated in front of
 //! it. Hosts and phones refuse to talk to a relay over plain HTTP unless it
@@ -45,7 +52,7 @@ use isudo_relay_core::{Limits, Push, Reject, Relay, Settled};
 use serde::Deserialize;
 use tokio::sync::Notify;
 
-use crate::apns::{Apns, ApnsConfig};
+use crate::apns::{Apns, ApnsConfig, Wording};
 
 /// Largest request body accepted: a full-size envelope, base64, plus slack.
 const MAX_BODY: usize = 128 * 1024;
@@ -369,7 +376,19 @@ fn apns_from_env() -> Result<Option<Apns>, String> {
     match NAMES.map(env) {
         [None, None, None, None] => Ok(None),
         [Some(key_file), Some(key_id), Some(team_id), Some(topic)] => {
-            Apns::new(ApnsConfig { key_file, key_id, team_id, topic }).map(Some)
+            let default = Wording::default();
+            let wording = Wording {
+                body: env("ISUDO_APNS_BODY").unwrap_or(default.body),
+                category: env("ISUDO_APNS_CATEGORY").unwrap_or(default.category),
+                key: env("ISUDO_APNS_PAYLOAD_KEY").unwrap_or(default.key),
+            };
+            let plain = |text: &str| !text.is_empty() && text.len() <= 64 && text.bytes().all(|b| b.is_ascii_graphic());
+            if !plain(&wording.category) || !plain(&wording.key) || wording.key == "aps" || wording.body.len() > 200 {
+                return Err("ISUDO_APNS_CATEGORY and ISUDO_APNS_PAYLOAD_KEY must be short plain words, and \
+                            ISUDO_APNS_BODY at most 200 bytes"
+                    .to_owned());
+            }
+            Apns::new(ApnsConfig { key_file, key_id, team_id, topic, wording }).map(Some)
         }
         _ => Err(format!("set all of {} or none of them", NAMES.join(", "))),
     }

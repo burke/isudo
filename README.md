@@ -310,6 +310,26 @@ for skills:
 mkdir -p ~/.claude/skills/isudo && isudo --skill > ~/.claude/skills/isudo/SKILL.md
 ```
 
+The skill only tells the agent to prefer `isudo`; it doesn't stop it from
+calling plain `sudo`. To make `isudo` the only route to root in Claude Code,
+deny `sudo` and pre-approve `isudo` in `~/.claude/settings.json` (your phone
+is then the only approval):
+
+```json
+{
+  "permissions": {
+    "deny": ["Bash(sudo:*)"],
+    "allow": ["Bash(isudo:*)"]
+  }
+}
+```
+
+Or with the Claude CLI:
+
+```bash
+claude --disallowedTools "Bash(sudo:*)" --allowedTools "Bash(isudo:*)"
+```
+
 ## What it does not do
 
 - **It shows you the command, not its consequences.** Approving
